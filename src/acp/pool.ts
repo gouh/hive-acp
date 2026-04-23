@@ -33,14 +33,14 @@ export class AcpPool {
       return entry.client;
     }
 
-    log.acp.info("Creating new AcpClient for chat %d", chatId);
+    log.acp.info({ chatId }, "creating new client");
     const client = new AcpClient();
     await client.start();
 
     // Inject previous summary if exists
     const summary = this.loadSummary(chatId);
     if (summary) {
-      log.acp.info("Injecting previous context for chat %d (%d chars)", chatId, summary.length);
+      log.acp.info({ chatId, summaryLength: summary.length }, "injecting previous context");
       await client.prompt([{
         type: "text",
         text: `[CONTEXT FROM PREVIOUS SESSION]\n${summary}\n[END CONTEXT]\n\nAcknowledge you have this context. Do not repeat it. Just say "Context restored." and wait for the user's next message.`,
@@ -48,7 +48,7 @@ export class AcpPool {
     }
 
     client.on("exit", () => {
-      log.acp.warn("AcpClient for chat %d exited, removing from pool", chatId);
+      log.acp.warn({ chatId }, "client exited, removing from pool");
       this.pool.delete(chatId);
     });
 
@@ -57,11 +57,11 @@ export class AcpPool {
   }
 
   private async evict(chatId: number, entry: PoolEntry): Promise<void> {
-    log.acp.info("Evicting idle AcpClient for chat %d, requesting summary...", chatId);
+    log.acp.info({ chatId }, "evicting idle client, requesting summary");
     const summary = await entry.client.summarize();
     if (summary) {
       this.saveSummary(chatId, summary);
-      log.acp.info("Summary saved for chat %d (%d chars)", chatId, summary.length);
+      log.acp.info({ chatId, summaryLength: summary.length }, "summary saved");
     }
     entry.client.stop();
     this.pool.delete(chatId);

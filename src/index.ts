@@ -21,7 +21,7 @@ import { pkg } from "./utils/pkg.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
-  log.main.fatal("TELEGRAM_BOT_TOKEN not set — copy .env.dist to .env");
+  log.main.fatal("TELEGRAM_BOT_TOKEN not set");
   process.exit(1);
 }
 
@@ -29,25 +29,18 @@ const MCP_PORT = parseInt(process.env.MCP_PORT || "4040", 10);
 const WORKSPACE = process.env.KIRO_WORKSPACE || process.cwd();
 
 async function boot(): Promise<void> {
-  log.main.info("━━━ %s v%s ━━━", pkg.name, pkg.version);
-  log.main.info("workspace: %s", WORKSPACE);
+  log.main.info({ version: pkg.version, workspace: WORKSPACE }, "starting");
 
-  // ── Step 1: Create core services ──────────────────────────
-  log.main.info("[1/4] Creating services...");
   const pool = new AcpPool();
   const telegram = new TelegramAdapter(TOKEN!, pool);
 
-  // ── Step 2: Register tool categories ──────────────────────
-  log.main.info("[2/4] Registering tool categories...");
   const categories: ToolCategory[] = [
     createTelegramTools(telegram, WORKSPACE),
   ];
   for (const cat of categories) {
-    log.mcp.info("  ├─ %s (%d tools: %s)", cat.name, cat.tools.length, cat.tools.map((t) => t.name).join(", "));
+    log.mcp.info({ category: cat.name, tools: cat.tools.map((t) => t.name) }, "tools registered");
   }
 
-  // ── Step 3: Start MCP WebSocket server ────────────────────
-  log.main.info("[3/4] Starting MCP server...");
   const server = createServer((_req, res) => {
     res.writeHead(404);
     res.end();
@@ -65,17 +58,13 @@ async function boot(): Promise<void> {
   });
 
   await new Promise<void>((resolve) => server.listen(MCP_PORT, resolve));
-  log.mcp.info("  └─ ws://localhost:%d/mcp", MCP_PORT);
+  log.mcp.info({ port: MCP_PORT, path: "/mcp" }, "server listening");
 
-  // ── Step 4: Start Telegram polling ────────────────────────
-  log.main.info("[4/4] Starting Telegram adapter...");
   telegram.start();
-
-  // ── Ready ─────────────────────────────────────────────────
-  log.main.info("━━━ Ready — ACP clients spawn per chat on demand ━━━");
+  log.main.info("ready");
 
   const shutdown = async () => {
-    log.main.info("Shutting down...");
+    log.main.info("shutting down");
     telegram.stop();
     await pool.stop();
     server.close();
@@ -86,6 +75,6 @@ async function boot(): Promise<void> {
 }
 
 boot().catch((err) => {
-  log.main.fatal("Boot failed: %s", err);
+  log.main.fatal({ err }, "boot failed");
   process.exit(1);
 });

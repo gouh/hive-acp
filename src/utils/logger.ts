@@ -4,6 +4,7 @@ const root = pino({
   level: process.env.LOG_LEVEL || "info",
   formatters: {
     level: (label: string) => ({ level: label }),
+    bindings: () => ({}),
   },
   timestamp: pino.stdTimeFunctions.isoTime,
 });

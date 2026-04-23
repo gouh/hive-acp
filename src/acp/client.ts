@@ -41,9 +41,7 @@ export class AcpClient extends EventEmitter {
     const args = ["acp", "--trust-all-tools"];
     const agent = process.env.KIRO_AGENT;
     if (agent) args.push("--agent", agent);
-    log.acp.info("  ├─ bin: %s", KIRO_CLI);
-    log.acp.info("  ├─ agent: %s", agent || "default");
-    log.acp.info("  └─ cwd: %s", WORKSPACE);
+    log.acp.info({ bin: KIRO_CLI, agent: agent || "default", cwd: WORKSPACE }, "spawning kiro-cli");
 
     this.proc = spawn(KIRO_CLI, args, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -74,14 +72,14 @@ export class AcpClient extends EventEmitter {
       },
       clientInfo: { name: pkg.name, version: pkg.version },
     });
-    log.acp.info("  ├─ server: %s %s", init.agentInfo?.name, init.agentInfo?.version);
+    log.acp.info({ server: init.agentInfo?.name, serverVersion: init.agentInfo?.version }, "initialized");
 
     const session = await this.request("session/new", {
       cwd: WORKSPACE,
       mcpServers: [],
     });
     this.sessionId = session.sessionId;
-    log.acp.info("  └─ session: %s", this.sessionId);
+    log.acp.info({ sessionId: this.sessionId }, "session created");
 
     return this.sessionId;
   }

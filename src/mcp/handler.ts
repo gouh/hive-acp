@@ -8,7 +8,7 @@ import { log } from "../utils/logger.js";
 import { pkg } from "../utils/pkg.js";
 
 export function handleMcpConnection(ws: WebSocket, categories: ToolCategory[]): void {
-  log.mcp.info("Client connected (%d categories: %s)", categories.length, categories.map((c) => c.name).join(", "));
+  log.mcp.info({ categories: categories.map((c) => c.name) }, "client connected");
 
   const allTools = categories.flatMap((c) => c.tools);
   const handlerMap = new Map<string, ToolCategory>();
@@ -30,7 +30,7 @@ export function handleMcpConnection(ws: WebSocket, categories: ToolCategory[]): 
     if (reply) ws.send(JSON.stringify(reply));
   });
 
-  ws.on("close", () => log.mcp.info("Client disconnected"));
+  ws.on("close", () => log.mcp.info("client disconnected"));
 }
 
 async function handle(

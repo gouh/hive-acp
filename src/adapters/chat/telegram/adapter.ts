@@ -42,7 +42,7 @@ export class TelegramAdapter {
     this.bot.on("polling_error", (err) => {
       log.telegram.warn(`Polling error (will retry): ${err.message}`);
     });
-    log.telegram.info("Listening for messages");
+    log.telegram.info("listening for messages");
   }
 
   stop(): void {
@@ -70,7 +70,7 @@ export class TelegramAdapter {
     }
 
     this.processing.add(userId);
-    log.telegram.info(`← ${userId}: ${text.slice(0, 80) || (hasPhoto ? "[photo]" : "[document]")}`);
+    log.telegram.info({ chatId, userId, preview: text.slice(0, 80) || (hasPhoto ? "[photo]" : "[document]") }, "message received");
 
     try {
       this.activeCtx.set(chatId, {
@@ -91,9 +91,9 @@ export class TelegramAdapter {
       clearInterval(typingInterval);
 
       await this.sendResponse(chatId, response || "_(no response)_");
-      log.telegram.info(`→ ${userId}: ${(response || "").slice(0, 100)}`);
+      log.telegram.info({ chatId, userId, preview: (response || "").slice(0, 100) }, "response sent");
     } catch (err: any) {
-      log.telegram.error(err.message);
+      log.telegram.error({ err, chatId }, "message handling failed");
       await this.bot.sendMessage(chatId, `❌ Error: ${err.message}`);
     } finally {
       this.activeCtx.delete(chatId);
