@@ -24,7 +24,7 @@ Telegram ←→ TelegramAdapter ←→ AcpClient ←→ kiro-cli (stdio)
 npm install
 
 # Copy env and configure
-cp .env.example .env
+cp .env.dist .env
 # Edit .env with your Telegram bot token and settings
 
 # Run in development
@@ -37,7 +37,7 @@ npm start
 
 ## Configuration
 
-See `.env.example` for all available options. Key settings:
+See `.env.dist` for all available options. Key settings:
 
 - `TELEGRAM_BOT_TOKEN` — from [@BotFather](https://t.me/BotFather)
 - `KIRO_CLI_PATH` — path to kiro-cli binary

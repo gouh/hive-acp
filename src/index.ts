@@ -21,7 +21,7 @@ import { log } from "./utils/logger.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
-  log.main.fatal("TELEGRAM_BOT_TOKEN not set — copy .env.example to .env");
+  log.main.fatal("TELEGRAM_BOT_TOKEN not set — copy .env.dist to .env");
   process.exit(1);
 }
 
