@@ -35,6 +35,7 @@ export class AcpClient extends EventEmitter {
   private nextId = 0;
   private pending = new Map<number, PendingRequest>();
   private buffer = "";
+  private promptLock: Promise<void> = Promise.resolve();
 
   async start(): Promise<string | null> {
     const args = ["acp", "--trust-all-tools"];
@@ -86,7 +87,12 @@ export class AcpClient extends EventEmitter {
   }
 
   prompt(content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>): Promise<string> {
-    return new Promise((resolve, reject) => {
+    let release: () => void;
+    const next = new Promise<void>((r) => (release = r));
+    const wait = this.promptLock;
+    this.promptLock = next;
+
+    return wait.then(() => new Promise<string>((resolve, reject) => {
       const chunks: string[] = [];
 
       const onNotification = (_method: string, params: any) => {
@@ -104,13 +110,15 @@ export class AcpClient extends EventEmitter {
       })
         .then(() => {
           this.removeListener("notification", onNotification);
+          release!();
           resolve(chunks.join(""));
         })
         .catch((err) => {
           this.removeListener("notification", onNotification);
+          release!();
           reject(err);
         });
-    });
+    }));
   }
 
   stop(): void {
@@ -147,7 +155,9 @@ export class AcpClient extends EventEmitter {
       if (!line) continue;
       try {
         this.handleMessage(JSON.parse(line));
-      } catch {}
+      } catch (err: any) {
+        log.acp.warn("Failed to parse message: %s", err.message);
+      }
     }
   }
 

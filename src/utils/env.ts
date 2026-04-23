@@ -6,7 +6,8 @@ if (fs.existsSync(envPath)) {
   for (const line of fs.readFileSync(envPath, "utf-8").split("\n")) {
     const [key, ...val] = line.split("=");
     if (key && !key.startsWith("#")) {
-      process.env[key.trim()] = val.join("=").trim();
+      const raw = val.join("=").trim();
+      process.env[key.trim()] = raw.replace(/^(['"])(.*)\1$/, "$2");
     }
   }
 }

@@ -57,9 +57,10 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
     ],
 
     async execute(toolName: string, args: any): Promise<string> {
-      const { bot, chatId } = adapter;
+      const { bot } = adapter;
       if (!bot) throw new Error("Bot not initialized");
-      if (!chatId) throw new Error("No active Telegram chat");
+      const ctx = adapter.getActiveContext();
+      if (!ctx) throw new Error("No active Telegram chat");
 
       switch (toolName) {
         case "telegram_send_file": {
@@ -73,19 +74,19 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
           const opts = args.caption ? { caption: args.caption } : {};
 
           if ([".jpg", ".jpeg", ".png", ".gif"].includes(ext)) {
-            await bot.sendPhoto(chatId, filePath, opts);
+            await bot.sendPhoto(ctx.chatId, filePath, opts);
           } else {
-            await bot.sendDocument(chatId, filePath, opts);
+            await bot.sendDocument(ctx.chatId, filePath, opts);
           }
 
           return `✅ Sent ${path.basename(filePath)} to Telegram`;
         }
 
         case "telegram_react": {
-          const targetId = args.message_id ?? adapter.replyToMessageId ?? adapter.messageId;
+          const targetId = args.message_id ?? ctx.replyToMessageId ?? ctx.messageId;
           if (!targetId) throw new Error("No message to react to");
 
-          await bot.setMessageReaction(chatId, targetId, {
+          await bot.setMessageReaction(ctx.chatId, targetId, {
             reaction: JSON.stringify([{ type: "emoji", emoji: args.emoji }]),
           } as any);
 

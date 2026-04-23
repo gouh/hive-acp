@@ -17,9 +17,13 @@ export class TelegramAdapter {
   private acp: AcpClient;
   private allowedUsers: Set<string>;
   private processing = new Set<string>();
-  public chatId: number | null = null;
-  public messageId: number | null = null;
-  public replyToMessageId: number | null = null;
+  private activeCtx = new Map<string, { chatId: number; messageId: number; replyToMessageId?: number }>();
+
+  /** Returns the context for the currently active user (used by tools). */
+  getActiveContext(): { chatId: number; messageId: number; replyToMessageId?: number } | null {
+    const first = this.activeCtx.values().next();
+    return first.done ? null : first.value;
+  }
 
   constructor(token: string, acpClient: AcpClient) {
     this.bot = new TelegramBot(token, { polling: true });
@@ -68,11 +72,11 @@ export class TelegramAdapter {
     log.telegram.info(`← ${userId}: ${text.slice(0, 80) || (hasPhoto ? "[photo]" : "[document]")}`);
 
     try {
-      this.chatId = chatId;
-      this.messageId = msg.message_id;
-      if (msg.reply_to_message) {
-        this.replyToMessageId = msg.reply_to_message.message_id;
-      }
+      this.activeCtx.set(userId, {
+        chatId,
+        messageId: msg.message_id,
+        replyToMessageId: msg.reply_to_message?.message_id,
+      });
 
       await this.bot.sendChatAction(chatId, "typing");
       const typingInterval = setInterval(
@@ -90,6 +94,7 @@ export class TelegramAdapter {
       log.telegram.error(err.message);
       await this.bot.sendMessage(chatId, `❌ Error: ${err.message}`);
     } finally {
+      this.activeCtx.delete(userId);
       this.processing.delete(userId);
     }
   }
@@ -191,9 +196,16 @@ export class TelegramAdapter {
     parts.push(remaining);
 
     for (const part of parts) {
-      await this.bot
-        .sendMessage(chatId, part, { parse_mode: "Markdown" })
-        .catch(() => this.bot.sendMessage(chatId, part));
+      try {
+        await this.bot.sendMessage(chatId, part, { parse_mode: "Markdown" });
+      } catch {
+        try {
+          await this.bot.sendMessage(chatId, part, { parse_mode: "HTML" });
+        } catch {
+          log.telegram.warn("Markdown and HTML parse failed, sending as plain text");
+          await this.bot.sendMessage(chatId, part);
+        }
+      }
     }
   }
 }
