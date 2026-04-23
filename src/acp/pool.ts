@@ -67,11 +67,11 @@ export class AcpPool {
     this.pool.delete(chatId);
   }
 
-  private cleanup(): void {
+  private async cleanup(): Promise<void> {
     const now = Date.now();
     for (const [chatId, entry] of this.pool) {
       if (now - entry.lastUsed > IDLE_TTL_MS) {
-        this.evict(chatId, entry);
+        await this.evict(chatId, entry);
       }
     }
   }

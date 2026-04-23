@@ -10,6 +10,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import { log } from "../utils/logger.js";
+import { pkg } from "../utils/pkg.js";
 
 const KIRO_CLI = process.env.KIRO_CLI_PATH || "kiro-cli";
 const WORKSPACE = process.env.KIRO_WORKSPACE || process.cwd();
@@ -71,7 +72,7 @@ export class AcpClient extends EventEmitter {
         fs: { readTextFile: true, writeTextFile: true },
         terminal: true,
       },
-      clientInfo: { name: "kiro-acp-telegram-bot", version: "1.0.0" },
+      clientInfo: { name: pkg.name, version: pkg.version },
     });
     log.acp.info("  ├─ server: %s %s", init.agentInfo?.name, init.agentInfo?.version);
 

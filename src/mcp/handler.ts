@@ -5,6 +5,7 @@
 import type { WebSocket } from "ws";
 import type { ToolCategory } from "./types.js";
 import { log } from "../utils/logger.js";
+import { pkg } from "../utils/pkg.js";
 
 export function handleMcpConnection(ws: WebSocket, categories: ToolCategory[]): void {
   log.mcp.info("Client connected (%d categories: %s)", categories.length, categories.map((c) => c.name).join(", "));
@@ -44,7 +45,7 @@ async function handle(
       result: {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "the-hive-mcp", version: "1.0.0" },
+        serverInfo: { name: `${pkg.name}-mcp`, version: pkg.version },
       },
     };
   }

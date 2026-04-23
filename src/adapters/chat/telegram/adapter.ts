@@ -17,10 +17,11 @@ export class TelegramAdapter {
   private pool: AcpPool;
   private allowedUsers: Set<string>;
   private processing = new Set<string>();
-  private activeCtx = new Map<string, { chatId: number; messageId: number; replyToMessageId?: number }>();
+  private activeCtx = new Map<number, { chatId: number; messageId: number; replyToMessageId?: number }>();
 
-  /** Returns the context for the currently active user (used by tools). */
-  getActiveContext(): { chatId: number; messageId: number; replyToMessageId?: number } | null {
+  /** Returns the context for a specific chat (used by tools). */
+  getActiveContext(chatId?: number): { chatId: number; messageId: number; replyToMessageId?: number } | null {
+    if (chatId) return this.activeCtx.get(chatId) ?? null;
     const first = this.activeCtx.values().next();
     return first.done ? null : first.value;
   }
@@ -72,7 +73,7 @@ export class TelegramAdapter {
     log.telegram.info(`← ${userId}: ${text.slice(0, 80) || (hasPhoto ? "[photo]" : "[document]")}`);
 
     try {
-      this.activeCtx.set(userId, {
+      this.activeCtx.set(chatId, {
         chatId,
         messageId: msg.message_id,
         replyToMessageId: msg.reply_to_message?.message_id,
@@ -95,7 +96,7 @@ export class TelegramAdapter {
       log.telegram.error(err.message);
       await this.bot.sendMessage(chatId, `❌ Error: ${err.message}`);
     } finally {
-      this.activeCtx.delete(userId);
+      this.activeCtx.delete(chatId);
       this.processing.delete(userId);
     }
   }

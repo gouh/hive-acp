@@ -17,6 +17,7 @@ import { createTelegramTools } from "./adapters/chat/telegram/tools.js";
 import { handleMcpConnection } from "./mcp/handler.js";
 import type { ToolCategory } from "./mcp/types.js";
 import { log } from "./utils/logger.js";
+import { pkg } from "./utils/pkg.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
@@ -28,7 +29,7 @@ const MCP_PORT = parseInt(process.env.MCP_PORT || "4040", 10);
 const WORKSPACE = process.env.KIRO_WORKSPACE || process.cwd();
 
 async function boot(): Promise<void> {
-  log.main.info("━━━ Hive ACP Telegram Bot ━━━");
+  log.main.info("━━━ %s v%s ━━━", pkg.name, pkg.version);
   log.main.info("workspace: %s", WORKSPACE);
 
   // ── Step 1: Create core services ──────────────────────────
