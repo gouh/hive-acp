@@ -87,7 +87,7 @@ export class AcpPool {
   }
 
   private summaryPath(chatId: number): string {
-    return path.join(SUMMARIES_DIR, `${chatId}.txt`);
+    return path.join(SUMMARIES_DIR, `${chatId}.md`);
   }
 
   saveSummary(chatId: number, summary: string): void {
