@@ -1,8 +1,8 @@
 /**
- * Telegram Adapter — connects Telegram Bot API to the ACP client.
+ * Telegram Adapter — connects Telegram Bot API to the ACP client via grammy.
  */
 
-import TelegramBot from "node-telegram-bot-api";
+import { Bot, type Context, InputFile } from "grammy";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -13,7 +13,7 @@ const TELEGRAM_MAX_LENGTH = 4096;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]);
 
 export class TelegramAdapter {
-  readonly bot: TelegramBot;
+  readonly bot: Bot;
   private pool: AcpPool;
   private allowedUsers: Set<string>;
   private processing = new Set<string>();
@@ -27,7 +27,7 @@ export class TelegramAdapter {
   }
 
   constructor(token: string, pool: AcpPool) {
-    this.bot = new TelegramBot(token, { polling: true });
+    this.bot = new Bot(token);
     this.pool = pool;
     this.allowedUsers = new Set(
       (process.env.ALLOWED_USERS || "")
@@ -38,34 +38,35 @@ export class TelegramAdapter {
   }
 
   start(): void {
-    this.bot.on("message", (msg) => this.onMessage(msg));
-    this.bot.on("polling_error", (err) => {
-      log.telegram.warn(`Polling error (will retry): ${err.message}`);
+    this.bot.on("message", (ctx) => this.onMessage(ctx));
+    this.bot.catch((err) => {
+      log.telegram.warn({ err: err.message }, "bot error");
     });
+    this.bot.start();
     log.telegram.info("listening for messages");
   }
 
   stop(): void {
-    this.bot.stopPolling();
+    this.bot.stop();
   }
 
-  private async onMessage(msg: TelegramBot.Message): Promise<void> {
+  private async onMessage(ctx: Context): Promise<void> {
+    const msg = ctx.message!;
     const chatId = msg.chat.id;
     const userId = String(msg.from!.id);
     const text = msg.text?.trim() || msg.caption?.trim() || "";
     const hasPhoto = !!(msg.photo && msg.photo.length > 0);
     const hasDocument = !!msg.document;
 
-    // Skip messages with no text and no media
     if (!text && !hasPhoto && !hasDocument) return;
 
     if (this.allowedUsers.size > 0 && !this.allowedUsers.has(userId)) {
-      await this.bot.sendMessage(chatId, "⛔ Not authorized.");
+      await ctx.reply("⛔ Not authorized.");
       return;
     }
 
     if (this.processing.has(userId)) {
-      await this.bot.sendMessage(chatId, "⏳ Still working on your last message...");
+      await ctx.reply("⏳ Still working on your last message...");
       return;
     }
 
@@ -79,13 +80,13 @@ export class TelegramAdapter {
         replyToMessageId: msg.reply_to_message?.message_id,
       });
 
-      await this.bot.sendChatAction(chatId, "typing");
+      await ctx.replyWithChatAction("typing");
       const typingInterval = setInterval(
-        () => this.bot.sendChatAction(chatId, "typing").catch(() => {}),
+        () => ctx.replyWithChatAction("typing").catch(() => {}),
         4000
       );
 
-      const prompt = await this.buildPrompt(msg, text);
+      const prompt = await this.buildPrompt(ctx, text);
       const acp = await this.pool.get(chatId);
       const response = await acp.prompt(prompt);
       clearInterval(typingInterval);
@@ -94,7 +95,7 @@ export class TelegramAdapter {
       log.telegram.info({ chatId, userId, preview: (response || "").slice(0, 100) }, "response sent");
     } catch (err: any) {
       log.telegram.error({ err, chatId }, "message handling failed");
-      await this.bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+      await ctx.reply(`❌ Error: ${err.message}`);
     } finally {
       this.activeCtx.delete(chatId);
       this.processing.delete(userId);
@@ -102,25 +103,22 @@ export class TelegramAdapter {
   }
 
   private async buildPrompt(
-    msg: TelegramBot.Message,
+    ctx: Context,
     text: string,
   ): Promise<Array<{ type: string; text?: string; data?: string; mimeType?: string }>> {
+    const msg = ctx.message!;
     const parts: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [];
 
-    // Metadata header
     let header = `[telegram: message_id=${msg.message_id}, chat_id=${msg.chat.id}]\n`;
     if (msg.reply_to_message) {
       const replyText = msg.reply_to_message.text || "(non-text message)";
       header += `[replying_to: message_id=${msg.reply_to_message.message_id}, text="${replyText.slice(0, 200)}"]\n`;
     }
-    if (text) {
-      header += text;
-    }
+    if (text) header += text;
 
-    // Handle photo
     if (msg.photo && msg.photo.length > 0) {
-      const photo = msg.photo[msg.photo.length - 1]; // largest size
-      const imageData = await this.downloadFileAsBase64(photo.file_id);
+      const photo = msg.photo[msg.photo.length - 1];
+      const imageData = await this.downloadFileAsBase64(ctx, photo.file_id);
       if (imageData) {
         if (!text) header += "[The user sent a photo]";
         parts.push({ type: "text", text: header });
@@ -129,11 +127,10 @@ export class TelegramAdapter {
       }
     }
 
-    // Handle document (images sent as files)
     if (msg.document) {
       const ext = path.extname(msg.document.file_name || "").toLowerCase();
       if (IMAGE_EXTENSIONS.has(ext)) {
-        const imageData = await this.downloadFileAsBase64(msg.document.file_id);
+        const imageData = await this.downloadFileAsBase64(ctx, msg.document.file_id);
         if (imageData) {
           if (!text) header += `[The user sent an image file: ${msg.document.file_name}]`;
           parts.push({ type: "text", text: header });
@@ -141,8 +138,7 @@ export class TelegramAdapter {
           return parts;
         }
       }
-      // Non-image document — save to temp and mention in prompt
-      const filePath = await this.downloadFileToTemp(msg.document.file_id, msg.document.file_name || "file");
+      const filePath = await this.downloadFileToTemp(ctx, msg.document.file_id, msg.document.file_name || "file");
       if (filePath) {
         if (!text) header += `[The user sent a file: ${msg.document.file_name}]`;
         header += `\n[File saved to: ${filePath}]`;
@@ -153,38 +149,40 @@ export class TelegramAdapter {
     return parts;
   }
 
-  private async downloadFileAsBase64(fileId: string): Promise<{ base64: string; mimeType: string } | null> {
+  private async downloadFileAsBase64(ctx: Context, fileId: string): Promise<{ base64: string; mimeType: string } | null> {
     try {
-      const fileLink = await this.bot.getFileLink(fileId);
-      const response = await fetch(fileLink);
+      const file = await ctx.api.getFile(fileId);
+      const url = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`;
+      const response = await fetch(url);
       const buffer = Buffer.from(await response.arrayBuffer());
-      const ext = path.extname(new URL(fileLink).pathname).toLowerCase();
+      const ext = path.extname(file.file_path || "").toLowerCase();
       const mimeMap: Record<string, string> = {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
         ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
       };
       return { base64: buffer.toString("base64"), mimeType: mimeMap[ext] || "image/jpeg" };
     } catch (err: any) {
-      log.telegram.error(`Failed to download file: ${err.message}`);
+      log.telegram.error({ err: err.message }, "failed to download file");
       return null;
     }
   }
 
-  private async downloadFileToTemp(fileId: string, fileName: string): Promise<string | null> {
+  private async downloadFileToTemp(ctx: Context, fileId: string, fileName: string): Promise<string | null> {
     try {
-      const fileLink = await this.bot.getFileLink(fileId);
-      const response = await fetch(fileLink);
+      const file = await ctx.api.getFile(fileId);
+      const url = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`;
+      const response = await fetch(url);
       const buffer = Buffer.from(await response.arrayBuffer());
       const tmpPath = path.join(os.tmpdir(), `telegram-${Date.now()}-${fileName}`);
       fs.writeFileSync(tmpPath, buffer);
       return tmpPath;
     } catch (err: any) {
-      log.telegram.error(`Failed to download file: ${err.message}`);
+      log.telegram.error({ err: err.message }, "failed to download file");
       return null;
     }
   }
 
-  private async sendResponse(chatId: number, text: string): Promise<void> {
+  async sendResponse(chatId: number, text: string): Promise<void> {
     const parts: string[] = [];
     let remaining = text;
 
@@ -199,13 +197,13 @@ export class TelegramAdapter {
 
     for (const part of parts) {
       try {
-        await this.bot.sendMessage(chatId, part, { parse_mode: "Markdown" });
+        await this.bot.api.sendMessage(chatId, part, { parse_mode: "Markdown" });
       } catch {
         try {
-          await this.bot.sendMessage(chatId, part, { parse_mode: "HTML" });
+          await this.bot.api.sendMessage(chatId, part, { parse_mode: "HTML" });
         } catch {
-          log.telegram.warn("Markdown and HTML parse failed, sending as plain text");
-          await this.bot.sendMessage(chatId, part);
+          log.telegram.warn("markdown and HTML parse failed, sending as plain text");
+          await this.bot.api.sendMessage(chatId, part);
         }
       }
     }

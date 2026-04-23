@@ -2,6 +2,7 @@
  * Telegram tool category — tools exposed via MCP for Telegram interactions.
  */
 
+import { InputFile } from "grammy";
 import type { ToolCategory } from "../../../mcp/types.js";
 import type { TelegramAdapter } from "./adapter.js";
 import fs from "node:fs";
@@ -58,7 +59,6 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
 
     async execute(toolName: string, args: any): Promise<string> {
       const { bot } = adapter;
-      if (!bot) throw new Error("Bot not initialized");
       const ctx = adapter.getActiveContext();
       if (!ctx) throw new Error("No active Telegram chat");
 
@@ -71,12 +71,13 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
           if (!fs.existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
 
           const ext = path.extname(filePath).toLowerCase();
+          const file = new InputFile(filePath);
           const opts = args.caption ? { caption: args.caption } : {};
 
           if ([".jpg", ".jpeg", ".png", ".gif"].includes(ext)) {
-            await bot.sendPhoto(ctx.chatId, filePath, opts);
+            await bot.api.sendPhoto(ctx.chatId, file, opts);
           } else {
-            await bot.sendDocument(ctx.chatId, filePath, opts);
+            await bot.api.sendDocument(ctx.chatId, file, opts);
           }
 
           return `✅ Sent ${path.basename(filePath)} to Telegram`;
@@ -86,9 +87,9 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
           const targetId = args.message_id ?? ctx.replyToMessageId ?? ctx.messageId;
           if (!targetId) throw new Error("No message to react to");
 
-          await bot.setMessageReaction(ctx.chatId, targetId, {
-            reaction: JSON.stringify([{ type: "emoji", emoji: args.emoji }]),
-          } as any);
+          await bot.api.setMessageReaction(ctx.chatId, targetId, [
+            { type: "emoji", emoji: args.emoji },
+          ]);
 
           return `✅ Reacted with ${args.emoji} to message ${targetId}`;
         }
