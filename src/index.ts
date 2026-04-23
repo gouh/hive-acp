@@ -1,18 +1,17 @@
 /**
- * Kiro ACP Telegram Bot — Entry Point
+ * Hive ACP Telegram Bot — Entry Point
  *
  * Boot sequence:
  *   1. Load environment
- *   2. Register tool categories (adapters define their tools)
+ *   2. Create pool + adapter, register tool categories
  *   3. Start MCP WebSocket server (bridge endpoint)
- *   4. Connect ACP to kiro-cli (spawns bridge → discovers tools)
- *   5. Start Telegram polling (begin receiving messages)
+ *   4. Start Telegram polling (ACP clients spawn on demand per chat)
  */
 
 import "./utils/env.js";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
-import { AcpClient } from "./acp/client.js";
+import { AcpPool } from "./acp/pool.js";
 import { TelegramAdapter } from "./adapters/chat/telegram/adapter.js";
 import { createTelegramTools } from "./adapters/chat/telegram/tools.js";
 import { handleMcpConnection } from "./mcp/handler.js";
@@ -29,16 +28,16 @@ const MCP_PORT = parseInt(process.env.MCP_PORT || "4040", 10);
 const WORKSPACE = process.env.KIRO_WORKSPACE || process.cwd();
 
 async function boot(): Promise<void> {
-  log.main.info("━━━ Kiro ACP Telegram Bot ━━━");
+  log.main.info("━━━ Hive ACP Telegram Bot ━━━");
   log.main.info("workspace: %s", WORKSPACE);
 
   // ── Step 1: Create core services ──────────────────────────
-  log.main.info("[1/5] Creating services...");
-  const acp = new AcpClient();
-  const telegram = new TelegramAdapter(TOKEN!, acp);
+  log.main.info("[1/4] Creating services...");
+  const pool = new AcpPool();
+  const telegram = new TelegramAdapter(TOKEN!, pool);
 
   // ── Step 2: Register tool categories ──────────────────────
-  log.main.info("[2/5] Registering tool categories...");
+  log.main.info("[2/4] Registering tool categories...");
   const categories: ToolCategory[] = [
     createTelegramTools(telegram, WORKSPACE),
   ];
@@ -47,7 +46,7 @@ async function boot(): Promise<void> {
   }
 
   // ── Step 3: Start MCP WebSocket server ────────────────────
-  log.main.info("[3/5] Starting MCP server...");
+  log.main.info("[3/4] Starting MCP server...");
   const server = createServer((_req, res) => {
     res.writeHead(404);
     res.end();
@@ -67,22 +66,17 @@ async function boot(): Promise<void> {
   await new Promise<void>((resolve) => server.listen(MCP_PORT, resolve));
   log.mcp.info("  └─ ws://localhost:%d/mcp", MCP_PORT);
 
-  // ── Step 4: Connect ACP ───────────────────────────────────
-  log.main.info("[4/5] Connecting to kiro-cli...");
-  await acp.start();
-
-  // ── Step 5: Start Telegram polling ────────────────────────
-  log.main.info("[5/5] Starting Telegram adapter...");
+  // ── Step 4: Start Telegram polling ────────────────────────
+  log.main.info("[4/4] Starting Telegram adapter...");
   telegram.start();
 
   // ── Ready ─────────────────────────────────────────────────
-  log.main.info("━━━ Ready — send a message to your bot! ━━━");
+  log.main.info("━━━ Ready — ACP clients spawn per chat on demand ━━━");
 
-  // Graceful shutdown
   const shutdown = () => {
     log.main.info("Shutting down...");
     telegram.stop();
-    acp.stop();
+    pool.stop();
     server.close();
     process.exit(0);
   };

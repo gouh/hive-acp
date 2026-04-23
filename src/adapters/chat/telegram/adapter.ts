@@ -6,7 +6,7 @@ import TelegramBot from "node-telegram-bot-api";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import type { AcpClient } from "../../../acp/client.js";
+import type { AcpPool } from "../../../acp/pool.js";
 import { log } from "../../../utils/logger.js";
 
 const TELEGRAM_MAX_LENGTH = 4096;
@@ -14,7 +14,7 @@ const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bm
 
 export class TelegramAdapter {
   readonly bot: TelegramBot;
-  private acp: AcpClient;
+  private pool: AcpPool;
   private allowedUsers: Set<string>;
   private processing = new Set<string>();
   private activeCtx = new Map<string, { chatId: number; messageId: number; replyToMessageId?: number }>();
@@ -25,9 +25,9 @@ export class TelegramAdapter {
     return first.done ? null : first.value;
   }
 
-  constructor(token: string, acpClient: AcpClient) {
+  constructor(token: string, pool: AcpPool) {
     this.bot = new TelegramBot(token, { polling: true });
-    this.acp = acpClient;
+    this.pool = pool;
     this.allowedUsers = new Set(
       (process.env.ALLOWED_USERS || "")
         .split(",")
@@ -85,7 +85,8 @@ export class TelegramAdapter {
       );
 
       const prompt = await this.buildPrompt(msg, text);
-      const response = await this.acp.prompt(prompt);
+      const acp = await this.pool.get(chatId);
+      const response = await acp.prompt(prompt);
       clearInterval(typingInterval);
 
       await this.sendResponse(chatId, response || "_(no response)_");
