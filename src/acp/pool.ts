@@ -87,14 +87,21 @@ export class AcpPool {
     return path.join(SUMMARIES_DIR, `${chatId}.txt`);
   }
 
-  private saveSummary(chatId: number, summary: string): void {
+  saveSummary(chatId: number, summary: string): void {
     fs.writeFileSync(this.summaryPath(chatId), summary, "utf-8");
   }
 
-  private loadSummary(chatId: number): string | null {
+  loadSummary(chatId: number): string | null {
     const p = this.summaryPath(chatId);
     if (!fs.existsSync(p)) return null;
     return fs.readFileSync(p, "utf-8").trim() || null;
+  }
+
+  deleteSummary(chatId: number): boolean {
+    const p = this.summaryPath(chatId);
+    if (!fs.existsSync(p)) return false;
+    fs.unlinkSync(p);
+    return true;
   }
 
   async stop(): Promise<void> {

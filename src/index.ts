@@ -14,6 +14,7 @@ import { WebSocketServer } from "ws";
 import { AcpPool } from "./acp/pool.js";
 import { TelegramAdapter } from "./adapters/chat/telegram/adapter.js";
 import { createTelegramTools } from "./adapters/chat/telegram/tools.js";
+import { createContextTools } from "./adapters/context/tools.js";
 import { handleMcpConnection } from "./mcp/handler.js";
 import type { ToolCategory } from "./mcp/types.js";
 import { log } from "./utils/logger.js";
@@ -36,6 +37,7 @@ async function boot(): Promise<void> {
 
   const categories: ToolCategory[] = [
     createTelegramTools(telegram, WORKSPACE),
+    createContextTools(pool, telegram),
   ];
   for (const cat of categories) {
     log.mcp.info({ category: cat.name, tools: cat.tools.map((t) => t.name) }, "tools registered");
