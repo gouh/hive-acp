@@ -72,6 +72,13 @@ export class AcpPool {
     for (const [chatId, entry] of this.pool) {
       if (now - entry.lastUsed > IDLE_TTL_MS) {
         await this.evict(chatId, entry);
+        continue;
+      }
+      const alive = await entry.client.ping();
+      if (!alive) {
+        log.acp.warn({ chatId }, "health check failed, removing dead client");
+        entry.client.stop();
+        this.pool.delete(chatId);
       }
     }
   }

@@ -1,13 +1,4 @@
-import fs from "node:fs";
+import { config } from "dotenv";
 import path from "node:path";
 
-const envPath = path.join(import.meta.dirname, "..", "..", ".env");
-if (fs.existsSync(envPath)) {
-  for (const line of fs.readFileSync(envPath, "utf-8").split("\n")) {
-    const [key, ...val] = line.split("=");
-    if (key && !key.startsWith("#")) {
-      const raw = val.join("=").trim();
-      process.env[key.trim()] = raw.replace(/^(['"])(.*)\1$/, "$2");
-    }
-  }
-}
+config({ path: path.join(import.meta.dirname, "..", "..", ".env") });

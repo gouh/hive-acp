@@ -124,6 +124,16 @@ export class AcpClient extends EventEmitter {
     }
   }
 
+  async ping(): Promise<boolean> {
+    try {
+      if (!this.proc?.stdin?.writable) return false;
+      await this.request("ping", {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   stop(): void {
     if (this.proc) {
       this.proc.kill();
@@ -134,7 +144,7 @@ export class AcpClient extends EventEmitter {
   private request(method: string, params: Record<string, any>): Promise<any> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
-      const ms = method === "session/prompt" ? 300_000 : 120_000;
+      const ms = method === "session/prompt" ? 300_000 : method === "ping" ? 10_000 : 120_000;
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Timeout: ${method}`));
