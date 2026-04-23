@@ -30,7 +30,7 @@ export class TelegramAdapter {
     this.bot = new Bot(token);
     this.pool = pool;
     this.allowedUsers = new Set(
-      (process.env.ALLOWED_USERS || "")
+      (process.env.HIVE_ALLOWED_USERS || "")
         .split(",")
         .map((id) => id.trim())
         .filter(Boolean)

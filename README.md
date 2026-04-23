@@ -80,13 +80,13 @@ Edit `.env` with your values:
 
 | Variable | Required | Description |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | ✅ | Token from [@BotFather](https://t.me/BotFather) |
-| `KIRO_CLI_PATH` | | Absolute path to kiro-cli binary (default: `kiro-cli`) |
-| `KIRO_WORKSPACE` | | Directory for the agent to operate in (default: `cwd`) |
-| `ALLOWED_USERS` | | Comma-separated Telegram user IDs |
-| `KIRO_AGENT` | | Custom agent name matching `.kiro/agents/<name>.json` |
-| `MCP_PORT` | | WebSocket MCP server port (default: `4040`) |
-| `LOG_LEVEL` | | Pino log level (default: `info`) |
+| `HIVE_TELEGRAM_TOKEN` | ✅ | Token from [@BotFather](https://t.me/BotFather) |
+| `HIVE_CLI_PATH` | | Absolute path to kiro-cli binary (default: `kiro-cli`) |
+| `HIVE_WORKSPACE` | | Directory for the agent to operate in (default: `cwd`) |
+| `HIVE_ALLOWED_USERS` | | Comma-separated Telegram user IDs |
+| `HIVE_AGENT` | | Custom agent name matching `.kiro/agents/<name>.json` |
+| `HIVE_MCP_PORT` | | WebSocket MCP server port (default: `4040`) |
+| `HIVE_LOG_LEVEL` | | Pino log level (default: `info`) |
 
 ### Running
 

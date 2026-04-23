@@ -20,14 +20,14 @@ import type { ToolCategory } from "./mcp/types.js";
 import { log } from "./utils/logger.js";
 import { pkg } from "./utils/pkg.js";
 
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TOKEN = process.env.HIVE_TELEGRAM_TOKEN;
 if (!TOKEN) {
-  log.main.fatal("TELEGRAM_BOT_TOKEN not set");
+  log.main.fatal("HIVE_TELEGRAM_TOKEN not set");
   process.exit(1);
 }
 
-const MCP_PORT = parseInt(process.env.MCP_PORT || "4040", 10);
-const WORKSPACE = process.env.KIRO_WORKSPACE || process.cwd();
+const MCP_PORT = parseInt(process.env.HIVE_MCP_PORT || "4040", 10);
+const WORKSPACE = process.env.HIVE_WORKSPACE || process.cwd();
 
 async function boot(): Promise<void> {
   log.main.info({ version: pkg.version, workspace: WORKSPACE }, "starting");

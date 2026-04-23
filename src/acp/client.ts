@@ -12,8 +12,8 @@ import path from "node:path";
 import { log } from "../utils/logger.js";
 import { pkg } from "../utils/pkg.js";
 
-const KIRO_CLI = process.env.KIRO_CLI_PATH || "kiro-cli";
-const WORKSPACE = process.env.KIRO_WORKSPACE || process.cwd();
+const KIRO_CLI = process.env.HIVE_CLI_PATH || "kiro-cli";
+const WORKSPACE = process.env.HIVE_WORKSPACE || process.cwd();
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -39,7 +39,7 @@ export class AcpClient extends EventEmitter {
 
   async start(): Promise<string | null> {
     const args = ["acp", "--trust-all-tools"];
-    const agent = process.env.KIRO_AGENT;
+    const agent = process.env.HIVE_AGENT;
     if (agent) args.push("--agent", agent);
     log.acp.info({ bin: KIRO_CLI, agent: agent || "default", cwd: WORKSPACE }, "spawning kiro-cli");
 
