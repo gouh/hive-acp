@@ -74,11 +74,14 @@ export class AcpPool {
         await this.evict(chatId, entry);
         continue;
       }
-      const alive = await entry.client.ping();
-      if (!alive) {
-        log.acp.warn({ chatId }, "health check failed, removing dead client");
-        entry.client.stop();
-        this.pool.delete(chatId);
+      // Only health-check clients idle for at least 2 minutes
+      if (now - entry.lastUsed > 2 * 60 * 1000) {
+        const alive = await entry.client.ping();
+        if (!alive) {
+          log.acp.warn({ chatId }, "health check failed, removing dead client");
+          entry.client.stop();
+          this.pool.delete(chatId);
+        }
       }
     }
   }
