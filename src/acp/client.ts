@@ -113,6 +113,18 @@ export class AcpClient extends EventEmitter {
     });
   }
 
+  async summarize(): Promise<string> {
+    try {
+      return await this.prompt([{
+        type: "text",
+        text: "Generate a concise summary of our conversation so far. Include key topics discussed, decisions made, and any pending tasks. This summary will be used to restore context in a future session. Respond ONLY with the summary, no preamble.",
+      }]);
+    } catch (err: any) {
+      log.acp.warn("Failed to generate summary: %s", err.message);
+      return "";
+    }
+  }
+
   stop(): void {
     if (this.proc) {
       this.proc.kill();

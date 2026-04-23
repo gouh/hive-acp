@@ -73,15 +73,15 @@ async function boot(): Promise<void> {
   // ── Ready ─────────────────────────────────────────────────
   log.main.info("━━━ Ready — ACP clients spawn per chat on demand ━━━");
 
-  const shutdown = () => {
+  const shutdown = async () => {
     log.main.info("Shutting down...");
     telegram.stop();
-    pool.stop();
+    await pool.stop();
     server.close();
     process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => shutdown());
+  process.on("SIGTERM", () => shutdown());
 }
 
 boot().catch((err) => {
