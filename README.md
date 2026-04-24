@@ -1,6 +1,6 @@
 # hive-acp
 
-ACP (Agent Client Protocol) bridge that connects AI agents to messaging platforms. Each conversation gets its own isolated agent process with persistent context.
+An open source alternative to [OpenClaw](https://github.com/nicepkg/openclaw) focused on development workflows. Bridge that connects AI agents to messaging platforms using [ACP](https://agentclientprotocol.com) and [MCP](https://modelcontextprotocol.io), with isolated agent processes per conversation and persistent context.
 
 Currently supports **Telegram** via [grammy](https://grammy.dev/), with an extensible adapter architecture for adding more connectors.
 
@@ -11,11 +11,11 @@ Currently supports **Telegram** via [grammy](https://grammy.dev/), with an exten
 │  Telegram    │────▶│  TelegramAdapter │────▶│   AcpPool    │
 │  (grammy)   │◀────│                  │     │              │
 └─────────────┘     └──────────────────┘     │  ┌─────────┐ │
-                                             │  │ Client 1│ │──▶ kiro-cli (stdio)
+                                             │  │ Agent 1 │ │──▶ ACP (stdio)
 ┌─────────────┐     ┌──────────────────┐     │  ├─────────┤ │
-│  MCP Tools  │────▶│  WebSocket MCP   │     │  │ Client 2│ │──▶ kiro-cli (stdio)
+│  MCP Tools  │────▶│  WebSocket MCP   │     │  │ Agent 2 │ │──▶ ACP (stdio)
 │  (bridge)   │◀────│  Server          │     │  ├─────────┤ │
-└─────────────┘     └──────────────────┘     │  │ Client N│ │──▶ kiro-cli (stdio)
+└─────────────┘     └──────────────────┘     │  │ Agent N │ │──▶ ACP (stdio)
                                              │  └─────────┘ │
                                              └──────────────┘
 ```
@@ -24,16 +24,16 @@ Currently supports **Telegram** via [grammy](https://grammy.dev/), with an exten
 
 | Component | Description |
 |---|---|
-| `AcpClient` | JSON-RPC 2.0 over stdio — communicates with a single kiro-cli process |
+| `AcpClient` | JSON-RPC 2.0 over stdio — communicates with a single agent process |
 | `AcpPool` | Manages one `AcpClient` per chat with idle eviction, health checks, and context persistence |
-| `MCP Server` | WebSocket server exposing tool categories to the AI agent via the bridge |
+| `MCP Server` | WebSocket server exposing tool categories to the agent via the bridge |
 | `Adapters` | Chat platform connectors (Telegram) and utility tools (context management) |
 
 ## Features
 
-- **Multi-agent** — each chat conversation spawns its own isolated kiro-cli process
+- **Multi-agent** — each chat conversation spawns its own isolated agent process
 - **Context persistence** — conversation summaries saved to disk on eviction, restored on reconnect
-- **On-demand context management** — users can save, view, or clear context via chat commands
+- **On-demand context management** — users can save, view, or clear context via natural language
 - **Health checks** — idle clients pinged every minute, dead processes auto-removed
 - **Idle eviction** — unused agents cleaned up after 30 minutes with automatic summarization
 - **Structured logging** — JSON logs with queryable fields (pino), ready for any observability stack
@@ -59,7 +59,7 @@ Currently supports **Telegram** via [grammy](https://grammy.dev/), with an exten
 ### Prerequisites
 
 - Node.js 20+
-- [kiro-cli](https://github.com/aws/kiro-cli) installed and configured
+- An ACP-compatible CLI agent installed and configured
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
 ### Installation
@@ -81,7 +81,7 @@ Edit `.env` with your values:
 | Variable | Required | Description |
 |---|---|---|
 | `HIVE_TELEGRAM_TOKEN` | ✅ | Token from [@BotFather](https://t.me/BotFather) |
-| `HIVE_CLI_PATH` | | Absolute path to kiro-cli binary (default: `kiro-cli`) |
+| `HIVE_CLI_PATH` | | Absolute path to the agent CLI binary |
 | `HIVE_WORKSPACE` | | Directory for the agent to operate in (default: `cwd`) |
 | `HIVE_ALLOWED_USERS` | | Comma-separated Telegram user IDs |
 | `HIVE_AGENT` | | Custom agent name matching `.kiro/agents/<name>.json` |
@@ -105,16 +105,16 @@ npm start
 src/
 ├── index.ts                          # Entry point and boot sequence
 ├── acp/
-│   ├── client.ts                     # ACP JSON-RPC client (stdio to kiro-cli)
+│   ├── client.ts                     # ACP JSON-RPC client (stdio)
 │   └── pool.ts                       # Client pool with eviction, health checks, context
 ├── adapters/
 │   ├── chat/telegram/
-│   │   ├── adapter.ts                # Telegram ↔ ACP message handling (grammy)
+│   │   ├── adapter.ts                # Telegram - ACP message handling (grammy)
 │   │   └── tools.ts                  # Telegram MCP tools (send_file, react)
 │   └── context/
 │       └── tools.ts                  # Context MCP tools (save, show, clear)
 ├── mcp/
-│   ├── bridge.ts                     # stdio ↔ WebSocket bridge for kiro-cli
+│   ├── bridge.ts                     # stdio - WebSocket bridge
 │   ├── handler.ts                    # MCP WebSocket protocol handler
 │   └── types.ts                      # ToolCategory / ToolDefinition interfaces
 └── utils/
