@@ -12,6 +12,8 @@ import "./utils/env.js";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { AcpPool } from "./acp/pool.js";
+import { kiroProvider } from "./acp/providers/kiro.js";
+import { opencodeProvider } from "./acp/providers/opencode.js";
 import { TelegramAdapter } from "./adapters/chat/telegram/adapter.js";
 import { createTelegramTools } from "./adapters/chat/telegram/tools.js";
 import { createContextTools } from "./adapters/context/tools.js";
@@ -30,9 +32,19 @@ const MCP_PORT = parseInt(process.env.HIVE_MCP_PORT || "4040", 10);
 const WORKSPACE = process.env.HIVE_WORKSPACE || process.cwd();
 
 async function boot(): Promise<void> {
-  log.main.info({ version: pkg.version, workspace: WORKSPACE }, "starting");
+  const provider = (() => {
+    switch (process.env.HIVE_PROVIDER || "kiro") {
+      case "kiro": return kiroProvider();
+      case "opencode": return opencodeProvider();
+      default:
+        log.main.fatal({ provider: process.env.HIVE_PROVIDER }, "unknown provider");
+        process.exit(1);
+    }
+  })();
 
-  const pool = new AcpPool();
+  log.main.info({ version: pkg.version, workspace: WORKSPACE, provider: provider.name }, "starting");
+
+  const pool = new AcpPool(provider);
   const telegram = new TelegramAdapter(TOKEN!, pool);
 
   const categories: ToolCategory[] = [
