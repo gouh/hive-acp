@@ -11,8 +11,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { log } from "../utils/logger.js";
 import { pkg } from "../utils/pkg.js";
+import type { CliProvider } from "./providers/types.js";
 
-const KIRO_CLI = process.env.HIVE_CLI_PATH || "kiro-cli";
 const WORKSPACE = process.env.HIVE_WORKSPACE || process.cwd();
 
 interface PendingRequest {
@@ -37,15 +37,16 @@ export class AcpClient extends EventEmitter {
   private pending = new Map<number, PendingRequest>();
   private buffer = "";
 
-  async start(): Promise<string | null> {
-    const args = ["acp", "--trust-all-tools"];
-    const agent = process.env.HIVE_AGENT;
-    if (agent) args.push("--agent", agent);
-    log.acp.info({ bin: KIRO_CLI, agent: agent || "default", cwd: WORKSPACE }, "spawning kiro-cli");
+  constructor(private provider: CliProvider) {
+    super();
+  }
 
-    this.proc = spawn(KIRO_CLI, args, {
+  async start(): Promise<string | null> {
+    log.acp.info({ provider: this.provider.name, bin: this.provider.bin, cwd: WORKSPACE }, "spawning agent");
+
+    this.proc = spawn(this.provider.bin, this.provider.args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, KIRO_LOG_LEVEL: "error" },
+      env: { ...process.env, ...this.provider.env },
       cwd: WORKSPACE,
     });
 
@@ -55,10 +56,10 @@ export class AcpClient extends EventEmitter {
       if (msg) log.acp.debug(msg);
     });
     this.proc.on("exit", (code) => {
-      log.acp.error(`kiro-cli exited (code ${code})`);
+      log.acp.error(`agent exited (code ${code})`);
       for (const [, { reject, timeout }] of this.pending) {
         clearTimeout(timeout);
-        reject(new Error(`kiro-cli exited unexpectedly (code ${code})`));
+        reject(new Error(`agent exited unexpectedly (code ${code})`));
       }
       this.pending.clear();
       this.emit("exit", code);
@@ -66,10 +67,7 @@ export class AcpClient extends EventEmitter {
 
     const init = await this.request("initialize", {
       protocolVersion: 1,
-      clientCapabilities: {
-        fs: { readTextFile: true, writeTextFile: true },
-        terminal: true,
-      },
+      clientCapabilities: this.provider.capabilities,
       clientInfo: { name: pkg.name, version: pkg.version },
     });
     log.acp.info({ server: init.agentInfo?.name, serverVersion: init.agentInfo?.version }, "initialized");
@@ -101,7 +99,7 @@ export class AcpClient extends EventEmitter {
         sessionId: this.sessionId,
         prompt: content,
       })
-        .then(() => {
+        .then((result) => {
           this.removeListener("notification", onNotification);
           resolve(chunks.join(""));
         })
