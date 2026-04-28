@@ -78,15 +78,41 @@ cp .env.dist .env
 
 Edit `.env` with your values:
 
+#### General
+
+| Variable | Required | Description |
+|---|---|---|
+| `HIVE_WORKSPACE` | | Directory for the agent to operate in (default: `cwd`) |
+| `HIVE_MCP_PORT` | | WebSocket MCP server port (default: `4040`) |
+| `HIVE_LOG_LEVEL` | | Pino log level (default: `info`) |
+
+#### Provider
+
+| Variable | Required | Description |
+|---|---|---|
+| `HIVE_PROVIDER` | | ACP CLI provider to use: `kiro`, `opencode` (default: `kiro`) |
+
+#### Kiro
+
+| Variable | Required | Description |
+|---|---|---|
+| `HIVE_KIRO_CLI_PATH` | | Absolute path to `kiro-cli` binary (default: `kiro-cli` in PATH) |
+| `HIVE_KIRO_AGENT` | | Agent name matching `<workspace>/.kiro/agents/<name>.json` |
+
+#### OpenCode
+
+| Variable | Required | Description |
+|---|---|---|
+| `HIVE_OPENCODE_CLI_PATH` | | Absolute path to `opencode` binary (default: `opencode` in PATH) |
+
+> OpenCode also needs its provider API key (e.g. `ANTHROPIC_API_KEY`) set in your environment or configured in `opencode.json`. See [OpenCode docs](https://opencode.ai/docs/config/) for details.
+
+#### Telegram
+
 | Variable | Required | Description |
 |---|---|---|
 | `HIVE_TELEGRAM_TOKEN` | ✅ | Token from [@BotFather](https://t.me/BotFather) |
-| `HIVE_CLI_PATH` | | Absolute path to the agent CLI binary |
-| `HIVE_WORKSPACE` | | Directory for the agent to operate in (default: `cwd`) |
 | `HIVE_ALLOWED_USERS` | | Comma-separated Telegram user IDs |
-| `HIVE_AGENT` | | Custom agent name matching `.kiro/agents/<name>.json` |
-| `HIVE_MCP_PORT` | | WebSocket MCP server port (default: `4040`) |
-| `HIVE_LOG_LEVEL` | | Pino log level (default: `info`) |
 
 ### Running
 
@@ -106,7 +132,11 @@ src/
 ├── index.ts                          # Entry point and boot sequence
 ├── acp/
 │   ├── client.ts                     # ACP JSON-RPC client (stdio)
-│   └── pool.ts                       # Client pool with eviction, health checks, context
+│   ├── pool.ts                       # Client pool with eviction, health checks, context
+│   └── providers/
+│       ├── types.ts                  # CliProvider interface
+│       ├── kiro.ts                   # Kiro CLI provider
+│       └── opencode.ts              # OpenCode CLI provider
 ├── adapters/
 │   ├── chat/telegram/
 │   │   ├── adapter.ts                # Telegram - ACP message handling (grammy)
@@ -121,6 +151,24 @@ src/
     ├── env.ts                        # dotenv loader
     ├── logger.ts                     # Pino structured JSON logger
     └── pkg.ts                        # package.json reader
+```
+
+## Adding a new provider
+
+1. Create `src/acp/providers/<name>.ts` returning a `CliProvider`
+2. Add the case to the provider switch in `src/index.ts`
+3. Add `HIVE_<NAME>_*` variables to `.env.dist`
+
+The `CliProvider` interface:
+
+```typescript
+interface CliProvider {
+  name: string;
+  bin: string;
+  args: string[];
+  env?: Record<string, string>;
+  capabilities: Record<string, any>;
+}
 ```
 
 ## Adding a new adapter
