@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { AcpClient } from "./client.js";
+import type { CliProvider } from "./providers/types.js";
 import { log } from "../utils/logger.js";
 
 const IDLE_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -21,7 +22,7 @@ export class AcpPool {
   private pool = new Map<number, PoolEntry>();
   private cleanupTimer: ReturnType<typeof setInterval>;
 
-  constructor() {
+  constructor(private provider: CliProvider) {
     fs.mkdirSync(SUMMARIES_DIR, { recursive: true });
     this.cleanupTimer = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
   }
@@ -34,7 +35,7 @@ export class AcpPool {
     }
 
     log.acp.info({ chatId }, "creating new client");
-    const client = new AcpClient();
+    const client = new AcpClient(this.provider);
     await client.start();
 
     // Inject previous summary if exists
