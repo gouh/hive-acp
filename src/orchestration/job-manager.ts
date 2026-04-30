@@ -49,6 +49,14 @@ export class JobManager extends EventEmitter {
     return this.jobs.get(jobId);
   }
 
+  /** Get recent jobs for a chat, most recent first. */
+  getRecentJobs(chatId: number, limit = 5): Job[] {
+    return Array.from(this.jobs.values())
+      .filter((j) => j.chatId === chatId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, limit);
+  }
+
   cancel(jobId: string): boolean {
     const job = this.jobs.get(jobId);
     if (!job || job.status !== "running") return false;

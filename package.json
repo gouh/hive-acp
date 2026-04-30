@@ -16,6 +16,7 @@
     "hive:restart": "./scripts/hive.sh restart"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.21.0",
     "dotenv": "^17.4.2",
     "grammy": "^1.42.0",
     "pino": "^10.3.1",

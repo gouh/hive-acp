@@ -42,6 +42,7 @@ export class TelegramAdapter implements ChatAdapter {
   private allowedUsers: Set<string>;
   private processing = new Set<string>();
   private activeCtx = new Map<number, ChatContext>();
+  private contextBuilder?: (chatId: number) => string | null;
 
   getActiveContext(chatId?: number): ChatContext | null {
     if (chatId) return this.activeCtx.get(chatId) ?? null;
@@ -67,6 +68,11 @@ export class TelegramAdapter implements ChatAdapter {
     });
     this.bot.start();
     log.telegram.info("listening for messages");
+  }
+
+  /** Set a function that builds dynamic context injected into every user message. */
+  setContextBuilder(fn: (chatId: number) => string | null): void {
+    this.contextBuilder = fn;
   }
 
   stop(): void {
@@ -188,7 +194,6 @@ export class TelegramAdapter implements ChatAdapter {
 
     let typingInterval: ReturnType<typeof setInterval> | null = null;
     let acpInstance: any = null;
-    let responseSentViaStream = false;
     let notificationListener: ((method: string, params: any) => void) | null = null;
     let turnListener: ((_text: string) => Promise<void>) | null = null;
 
@@ -212,7 +217,8 @@ export class TelegramAdapter implements ChatAdapter {
 
       const prefix = this.pool.consumePrefix(chatId);
       const queued = this.pool.consumeQueue(chatId);
-      const preamble = [prefix, queued].filter(Boolean).join("\n\n");
+      const dynCtx = this.contextBuilder?.(chatId) ?? null;
+      const preamble = [prefix, dynCtx, queued].filter(Boolean).join("\n\n");
       if (preamble && prompt.length > 0 && prompt[0].type === "text") {
         prompt[0].text = `${preamble}\n\n${prompt[0].text}`;
       }
@@ -333,7 +339,6 @@ export class TelegramAdapter implements ChatAdapter {
         log.telegram.debug({ chatId, streamMsgId, bufferLen: streamBuffer.length }, "turn end");
         if (streamBuffer) {
           await flushStream(true);
-          responseSentViaStream = true;
         }
         streamMsgId = null;
         streamBuffer = "";
@@ -356,32 +361,12 @@ export class TelegramAdapter implements ChatAdapter {
 
       if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
 
-      if (!responseSentViaStream) {
-        const finalText = response || "_(no response)_";
-
-        log.telegram.debug({ chatId, totalStreamedChars, streamMsgId, bufferLen: streamBuffer.length }, "final send decision");
-
-        if (totalStreamedChars > 0) {
-          if (streamMsgId && streamBuffer) {
-            log.telegram.debug({ chatId, streamMsgId }, "final edit of streamed message");
-            const final = toTelegramMd(streamBuffer.slice(0, TELEGRAM_MAX_LENGTH));
-            await this.bot.api.editMessageText(chatId, streamMsgId, final, { parse_mode: "Markdown" })
-              .catch((err) => {
-                if (isNotModified(err)) return;
-                log.telegram.warn({ chatId, err: err.message }, "final markdown edit failed, retrying plain");
-                return this.bot.api.editMessageText(chatId, streamMsgId!, streamBuffer.slice(0, TELEGRAM_MAX_LENGTH))
-                  .catch((err2) => { if (!isNotModified(err2)) log.telegram.error({ chatId, err: err2.message }, "final plain edit also failed"); });
-              });
-          } else {
-            log.telegram.debug({ chatId }, "streamed but no msgId, sending full response");
-            await this.sendResponse(chatId, finalText);
-          }
-        } else {
-          log.telegram.debug({ chatId, len: finalText.length }, "no streaming, sending full response");
-          await this.sendResponse(chatId, finalText);
-        }
-      } else {
-        log.telegram.debug({ chatId }, "response already sent via stream, skipping sendResponse");
+      // Final delivery: flush any remaining streamed content with Markdown,
+      // or send the full response if nothing was streamed.
+      if (totalStreamedChars > 0 && streamBuffer) {
+        await flushStream(true);
+      } else if (totalStreamedChars === 0) {
+        await this.sendResponse(chatId, response || "_(no response)_");
       }
 
       log.telegram.info({ chatId, userId, preview: (response || "").slice(0, 100) }, "response sent");

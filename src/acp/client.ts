@@ -1,47 +1,26 @@
 /**
- * ACP Client — JSON-RPC 2.0 over stdio.
+ * ACP Client — powered by @agentclientprotocol/sdk.
  *
- * Implements the Agent Client Protocol (ACP) to communicate with any
- * ACP-compatible CLI agent. Provider-specific notification parsing is
- * delegated to the CliProvider's ResponseParser.
- * Protocol: newline-delimited JSON-RPC 2.0 on stdin/stdout.
+ * Wraps ClientSideConnection to provide a simplified API for hive-acp.
+ * Provider-specific notification parsing is delegated to the CliProvider's ResponseParser.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { Writable, Readable } from "node:stream";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
+import * as acp from "@agentclientprotocol/sdk";
 import { log } from "../utils/logger.js";
 import { pkg } from "../utils/pkg.js";
-import { NdJsonParser } from "./framing.js";
 import type { CliProvider } from "./providers/types.js";
 
 const WORKSPACE = process.env.HIVE_WORKSPACE || process.cwd();
 
-interface PendingRequest {
-  resolve: (value: any) => void;
-  reject: (reason: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
-interface JsonRpcMessage {
-  jsonrpc: string;
-  id?: number;
-  method?: string;
-  params?: Record<string, any>;
-  result?: any;
-  error?: { code: number; message: string };
-}
-
 export class AcpClient extends EventEmitter {
   private proc: ChildProcess | null = null;
+  private conn: acp.ClientSideConnection | null = null;
   private sessionId: string | null = null;
-  private nextId = 0;
-  private pending = new Map<number, PendingRequest>();
-  private parser = new NdJsonParser(
-    (msg) => this.handleMessage(msg as JsonRpcMessage),
-    (err) => log.acp.warn("Failed to parse message: %s", err.message),
-  );
   private promptLock: Promise<void> = Promise.resolve();
 
   /** Context usage metrics — tracked across the lifetime of this client. */
@@ -77,7 +56,6 @@ export class AcpClient extends EventEmitter {
       cwd: WORKSPACE,
     });
 
-    this.proc.stdout!.on("data", (chunk: Buffer) => this.parser.write(chunk));
     this.proc.stderr!.on("data", (chunk: Buffer) => {
       const msg = chunk.toString().trim();
       if (msg) log.acp.debug(msg);
@@ -85,25 +63,28 @@ export class AcpClient extends EventEmitter {
     this.proc.on("exit", (code) => {
       if (code !== null && code !== 0) {
         log.acp.error(`agent exited (code ${code})`);
-      } else {
-        log.acp.debug(`agent exited (code ${code})`);
       }
-      for (const [, { reject, timeout }] of this.pending) {
-        clearTimeout(timeout);
-        reject(new Error(`agent exited unexpectedly (code ${code})`));
-      }
-      this.pending.clear();
       this.emit("exit", code);
     });
 
-    const init = await this.request("initialize", {
-      protocolVersion: 1,
+    // Create SDK connection
+    const input = Writable.toWeb(this.proc.stdin!) as WritableStream<Uint8Array>;
+    const output = Readable.toWeb(this.proc.stdout!) as ReadableStream<Uint8Array>;
+    const stream = acp.ndJsonStream(input, output);
+
+    this.conn = new acp.ClientSideConnection(
+      (_agent) => this.createClientHandler(),
+      stream,
+    );
+
+    const init = await this.conn.initialize({
+      protocolVersion: acp.PROTOCOL_VERSION,
       clientCapabilities: this.provider.capabilities,
       clientInfo: { name: pkg.name, version: pkg.version },
     });
     log.acp.info({ server: init.agentInfo?.name, serverVersion: init.agentInfo?.version }, "initialized");
 
-    const session = await this.request("session/new", {
+    const session = await this.conn.newSession({
       cwd: WORKSPACE,
       mcpServers: [],
     });
@@ -114,73 +95,103 @@ export class AcpClient extends EventEmitter {
   }
 
   prompt(content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>): Promise<string> {
+    if (!this.conn || !this.sessionId) {
+      return Promise.reject(new Error("ACP client not started"));
+    }
+
+    const run = async (): Promise<string> => {
+      this.metrics.promptCount++;
+      this._promptChunks = [];
+      this._promptFullMessage = null;
+
+      await this.conn!.prompt({
+        sessionId: this.sessionId!,
+        prompt: content as any,
+      });
+
+      // prompt() resolves after all sessionUpdate callbacks have been called.
+      return this._promptFullMessage ?? this._promptChunks.join("");
+    };
+
+    const result = this.promptLock.then(() => run());
+    this.promptLock = result.then(() => {}, () => {});
+    return result;
+  }
+
+  // Accumulator for the current prompt's text
+  private _promptChunks: string[] = [];
+  private _promptFullMessage: string | null = null;
+
+  private createClientHandler(): acp.Client {
+    const self = this;
     const { parser } = this.provider;
 
-    const run = (): Promise<string> => new Promise((resolve, reject) => {
-      let chunks: string[] = [];
-      let fullMessage: string | null = null;
-      this.metrics.promptCount++;
-
-      const onNotification = (_method: string, params: any) => {
-        const u = params.update;
+    return {
+      async sessionUpdate(params: acp.SessionNotification): Promise<void> {
+        const u = params.update as Record<string, any>;
         if (!u) return;
 
         log.acp.debug({ sessionUpdate: u.sessionUpdate }, "session update received");
 
+        // Emit raw notification for adapter (streaming, tool progress)
+        self.emit("notification", "session/update", { update: u });
+
         // Track tool calls
         const tool = parser.toolCall(u);
-        if (tool) this.metrics.toolCalls.push(tool);
+        if (tool) self.metrics.toolCalls.push(tool);
 
-        // Turn boundary — emit the completed turn's text and reset for the next turn.
+        // Turn boundary — emit turn_message and reset
         if (parser.isTurnEnd(u)) {
-          const text = fullMessage ?? chunks.join("");
-          if (text) this.emit("turn_message", text);
-          chunks = [];
-          fullMessage = null;
+          const text = self._promptFullMessage ?? self._promptChunks.join("");
+          if (text) self.emit("turn_message", text);
+          self._promptChunks = [];
+          self._promptFullMessage = null;
           return;
         }
 
+        // Accumulate chunks
         const chunk = parser.messageChunk(u);
         if (chunk !== null) {
-          chunks.push(chunk);
-          this.metrics.chunkCount++;
-          this.metrics.charCount += chunk.length;
+          self._promptChunks.push(chunk);
+          self.metrics.chunkCount++;
+          self.metrics.charCount += chunk.length;
         }
 
+        // Full message
         const full = parser.fullMessage(u);
         if (full !== null) {
-          fullMessage = full;
-          // For providers that don't emit TurnEnd (e.g. OpenCode),
-          // fullMessage signals the end of a turn.
-          if (!parser.isTurnEnd(u)) {
-            const text = fullMessage ?? chunks.join("");
-            if (text) this.emit("turn_message", text);
-            chunks = [];
-            fullMessage = null;
-          }
+          self._promptFullMessage = full;
         }
-      };
+      },
 
-      this.on("notification", onNotification);
+      async requestPermission(params: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse> {
+        const allowOption = params.options.find((o) => o.kind === "allow_always")
+          || params.options.find((o) => o.kind === "allow_once")
+          || params.options[0];
+        return { outcome: { outcome: "selected", optionId: allowOption.optionId } };
+      },
 
-      this.request("session/prompt", {
-        sessionId: this.sessionId,
-        prompt: content,
-      })
-        .then(() => {
-          this.removeListener("notification", onNotification);
-          resolve(fullMessage ?? chunks.join(""));
-        })
-        .catch((err) => {
-          this.removeListener("notification", onNotification);
-          reject(err);
-        });
-    });
+      async readTextFile(params: acp.ReadTextFileRequest): Promise<acp.ReadTextFileResponse> {
+        const p = params.path.startsWith("/")
+          ? params.path
+          : path.join(WORKSPACE, params.path);
+        return { content: fs.readFileSync(p, "utf-8") };
+      },
 
-    // Serialize prompts — wait for previous to finish before starting next
-    const result = this.promptLock.then(() => run());
-    this.promptLock = result.then(() => {}, () => {});
-    return result;
+      async writeTextFile(params: acp.WriteTextFileRequest): Promise<acp.WriteTextFileResponse> {
+        const p = params.path.startsWith("/")
+          ? params.path
+          : path.join(WORKSPACE, params.path);
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, params.content, "utf-8");
+        self.metrics.filesModified.push(p);
+        return {};
+      },
+
+      async createTerminal(params: acp.CreateTerminalRequest): Promise<acp.CreateTerminalResponse> {
+        return { terminalId: `term-${Date.now()}` };
+      },
+    };
   }
 
   async summarize(): Promise<string> {
@@ -219,10 +230,9 @@ export class AcpClient extends EventEmitter {
   async ping(): Promise<boolean> {
     try {
       if (!this.proc?.stdin?.writable) return false;
-      // Bypass promptLock — ping is a lightweight health check that should not
-      // queue behind long-running prompts or block them.
-      await this.request("ping", {});
-      return true;
+      // SDK doesn't expose ping directly, use a lightweight prompt check
+      // For now, check if the process is alive
+      return this.proc?.exitCode === null;
     } catch {
       return false;
     }
@@ -233,111 +243,6 @@ export class AcpClient extends EventEmitter {
       this.proc.kill();
       this.proc = null;
     }
-  }
-
-  private request(method: string, params: Record<string, any>): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const id = this.nextId++;
-      const ms = method === "session/prompt" ? 600_000 : method === "ping" ? 10_000 : 120_000;
-      const timeout = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Timeout: ${method}`));
-      }, ms);
-      this.pending.set(id, { resolve, reject, timeout });
-      this.send({ jsonrpc: "2.0", id, method, params });
-    });
-  }
-
-  private send(msg: JsonRpcMessage): void {
-    if (!this.proc?.stdin?.writable) throw new Error("ACP process not running");
-    this.proc.stdin.write(JSON.stringify(msg) + "\n");
-  }
-
-  private handleMessage(msg: JsonRpcMessage): void {
-    if (msg.id !== undefined && this.pending.has(msg.id)) {
-      const { resolve, reject, timeout } = this.pending.get(msg.id)!;
-      clearTimeout(timeout);
-      this.pending.delete(msg.id);
-      if (msg.error) reject(new Error(msg.error.message));
-      else resolve(msg.result);
-      return;
-    }
-    if (msg.id !== undefined && msg.method) {
-      this.handleServerRequest(msg);
-      return;
-    }
-    if (msg.method) {
-      this.emit("notification", msg.method, msg.params || {});
-    }
-  }
-
-  private async handleServerRequest(msg: JsonRpcMessage): Promise<void> {
-    try {
-      const result = await this.dispatch(msg.method!, msg.params || {});
-      this.send({ jsonrpc: "2.0", id: msg.id, result } as any);
-    } catch (err: any) {
-      this.send({
-        jsonrpc: "2.0",
-        id: msg.id,
-        error: { code: -32000, message: err.message },
-      });
-    }
-  }
-
-  private async dispatch(method: string, params: Record<string, any>): Promise<any> {
-    switch (method) {
-      case "fs/readTextFile": {
-        const p = params.path.startsWith("/")
-          ? params.path
-          : path.join(WORKSPACE, params.path);
-        return { content: fs.readFileSync(p, "utf-8") };
-      }
-      case "fs/writeTextFile": {
-        const p = params.path.startsWith("/")
-          ? params.path
-          : path.join(WORKSPACE, params.path);
-        fs.mkdirSync(path.dirname(p), { recursive: true });
-        fs.writeFileSync(p, params.content, "utf-8");
-        this.metrics.filesModified.push(p);
-        return { success: true };
-      }
-      case "terminal/execute": {
-        return new Promise((resolve) => {
-          let stdout = "";
-          let stderr = "";
-          let killed = false;
-
-          const child = spawn("sh", ["-c", params.command], {
-            cwd: WORKSPACE,
-            stdio: ["ignore", "pipe", "pipe"],
-            detached: true,
-          });
-
-          const timer = setTimeout(() => {
-            killed = true;
-            try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already dead */ }
-            resolve({ output: `${stdout}\n[timeout — process killed after 15s]` });
-          }, 15_000);
-
-          child.stdout!.on("data", (d: Buffer) => { stdout += d.toString(); });
-          child.stderr!.on("data", (d: Buffer) => { stderr += d.toString(); });
-
-          child.on("close", (code) => {
-            if (killed) return;
-            clearTimeout(timer);
-            const out = stdout + (stderr ? `\n${stderr}` : "");
-            resolve({ output: out || `[exit code ${code}]` });
-          });
-
-          child.on("error", (err) => {
-            if (killed) return;
-            clearTimeout(timer);
-            resolve({ output: `[error: ${err.message}]` });
-          });
-        });
-      }
-      default:
-        throw new Error(`Unsupported: ${method}`);
-    }
+    this.conn = null;
   }
 }

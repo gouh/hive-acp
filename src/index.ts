@@ -31,6 +31,7 @@ import { handleMcpConnection } from "./mcp/handler.js";
 import type { ToolCategory } from "./mcp/types.js";
 import { JobManager } from "./orchestration/job-manager.js";
 import { createOrchestrationTools } from "./orchestration/tools.js";
+import { buildOrchestratorContext } from "./orchestration/context.js";
 import { log } from "./utils/logger.js";
 import { bootstrap, HIVE_HOME } from "./utils/paths.js";
 import { pkg } from "./utils/pkg.js";
@@ -105,6 +106,7 @@ async function boot(): Promise<void> {
   const jobManager = new JobManager(registry, store);
 
   chat.bindJobManager(jobManager, pool);
+  chat.setContextBuilder((chatId) => buildOrchestratorContext(chatId, registry, jobManager, store));
 
   const categories: ToolCategory[] = [
     createTelegramTools(chat, WORKSPACE),
