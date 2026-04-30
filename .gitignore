@@ -4,3 +4,6 @@ dist/
 .state/
 *.tsbuildinfo
 .DS_Store
+
+logs/
+.hive.pid
