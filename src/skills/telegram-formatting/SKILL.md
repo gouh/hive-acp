@@ -76,3 +76,14 @@ Apply it in `src/utils.ts` line 42.
 - ❌ HTML tables → ✅ Bullet lists or code blocks
 - ❌ Nested formatting `*_bold italic_*` → ✅ Keep it simple
 - ❌ Unescaped special chars → ✅ Escape with `\`
+
+## Reactions
+
+You can react to user messages with `telegram_react`. Only these 83 emojis are valid:
+
+👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 🤩 🤮 💩 🙏 👌 🕊 🤡 🥱 🥴 😍 🐳 ❤️‍🔥 🌚 🌭 💯 🤣 ⚡ 🍌 🏆 💔 🤨 😐 🍓 🍾 💋 🖕 😈 😴 😭 🤓 👻 👨‍💻 👀 🎃 🙈 😇 😨 🤝 ✍ 🤗 🫡 🎅 🎄 ☃ 💅 🤪 🗿 🆒 💘 🙉 🦄 😘 💊 🙊 😎 👾 🤷‍♂️ 🤷 🤷‍♀️ 😡
+
+Rules:
+- Only 1 reaction per message (bot limitation)
+- Do NOT use any emoji outside this list — the API will reject it
+- React proactively: 👀 when reviewing, ✅ when done, 🔥 for excitement, 🤔 when analyzing
