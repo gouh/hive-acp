@@ -1,17 +1,25 @@
 {
   "name": "hive-acp",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "create-agent": "tsx src/cli/create-agent.ts",
+    "hive:start": "./scripts/hive.sh start",
+    "hive:stop": "./scripts/hive.sh stop",
+    "hive:status": "./scripts/hive.sh status",
+    "hive:logs": "./scripts/hive.sh logs",
+    "hive:restart": "./scripts/hive.sh restart"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
     "grammy": "^1.42.0",
     "pino": "^10.3.1",
+    "puppeteer": "^24.42.0",
     "ws": "8.18.0"
   },
   "devDependencies": {
