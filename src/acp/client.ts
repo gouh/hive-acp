@@ -150,14 +150,6 @@ export class AcpClient extends EventEmitter {
         const full = parser.fullMessage(u);
         if (full !== null) {
           fullMessage = full;
-          // For providers that don't emit TurnEnd (e.g. OpenCode),
-          // fullMessage signals the end of a turn.
-          if (!parser.isTurnEnd(u)) {
-            const text = fullMessage ?? chunks.join("");
-            if (text) this.emit("turn_message", text);
-            chunks = [];
-            fullMessage = null;
-          }
         }
       };
 
