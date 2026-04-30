@@ -361,29 +361,12 @@ export class TelegramAdapter implements ChatAdapter {
 
       if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
 
-      // If onTurn already flushed and reset the buffer, the user already has the message.
-      // Only send if there's still unflushed content or nothing was streamed at all.
-      const needsFinalSend = streamBuffer.length > 0 || totalStreamedChars === 0;
-
-      if (needsFinalSend) {
-        const finalText = response || "_(no response)_";
-
-        if (totalStreamedChars > 0) {
-          if (streamMsgId && streamBuffer) {
-            const final = toTelegramMd(streamBuffer.slice(0, TELEGRAM_MAX_LENGTH));
-            await this.bot.api.editMessageText(chatId, streamMsgId, final, { parse_mode: "Markdown" })
-              .catch((err) => {
-                if (isNotModified(err)) return;
-                log.telegram.warn({ chatId, err: err.message }, "final markdown edit failed, retrying plain");
-                return this.bot.api.editMessageText(chatId, streamMsgId!, streamBuffer.slice(0, TELEGRAM_MAX_LENGTH))
-                  .catch((err2) => { if (!isNotModified(err2)) log.telegram.error({ chatId, err: err2.message }, "final plain edit also failed"); });
-              });
-          } else {
-            await this.sendResponse(chatId, finalText);
-          }
-        } else {
-          await this.sendResponse(chatId, finalText);
-        }
+      // Final delivery: flush any remaining streamed content with Markdown,
+      // or send the full response if nothing was streamed.
+      if (totalStreamedChars > 0 && streamBuffer) {
+        await flushStream(true);
+      } else if (totalStreamedChars === 0) {
+        await this.sendResponse(chatId, response || "_(no response)_");
       }
 
       log.telegram.info({ chatId, userId, preview: (response || "").slice(0, 100) }, "response sent");
