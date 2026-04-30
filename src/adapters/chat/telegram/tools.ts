@@ -1,33 +1,34 @@
 /**
  * Telegram tool category — tools exposed via MCP for Telegram interactions.
+ *
+ * send_file uses the ChatAdapter interface (platform-agnostic).
+ * react requires direct Telegram bot access (platform-specific).
  */
 
-import { InputFile } from "grammy";
 import type { ToolCategory } from "../../../mcp/types.js";
+import type { ChatAdapter } from "../types.js";
 import type { TelegramAdapter } from "./adapter.js";
 import fs from "node:fs";
 import path from "node:path";
 
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif"]);
+
 export function createTelegramTools(adapter: TelegramAdapter, workspace: string): ToolCategory {
+  const chat: ChatAdapter = adapter;
+
   return {
     name: "telegram",
     tools: [
       {
         name: "telegram_send_file",
         description:
-          "Send a file from the workspace to the user's active Telegram chat. " +
+          "Send a file from the workspace to the user's active chat. " +
           "Use when the user asks to receive a file, document, image, or export.",
         inputSchema: {
           type: "object",
           properties: {
-            file_path: {
-              type: "string",
-              description: "Absolute or workspace-relative path to the file",
-            },
-            caption: {
-              type: "string",
-              description: "Optional caption to accompany the file",
-            },
+            file_path: { type: "string", description: "Absolute or workspace-relative path to the file" },
+            caption: { type: "string", description: "Optional caption to accompany the file" },
           },
           required: ["file_path"],
         },
@@ -43,14 +44,8 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
         inputSchema: {
           type: "object",
           properties: {
-            emoji: {
-              type: "string",
-              description: "A single emoji to react with (e.g. 👍, 🔥, ❤️, 🎉, 😂, 🤔, 👀, ✅)",
-            },
-            message_id: {
-              type: "number",
-              description: "The Telegram message_id to react to. If omitted, reacts to the user's current message.",
-            },
+            emoji: { type: "string", description: "A single emoji to react with (e.g. 👍, 🔥, ❤️, 🎉, 😂, 🤔, 👀, ✅)" },
+            message_id: { type: "number", description: "The Telegram message_id to react to. If omitted, reacts to the user's current message." },
           },
           required: ["emoji"],
         },
@@ -58,9 +53,8 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
     ],
 
     async execute(toolName: string, args: any): Promise<string> {
-      const { bot } = adapter;
-      const ctx = adapter.getActiveContext();
-      if (!ctx) throw new Error("No active Telegram chat");
+      const ctx = chat.getActiveContext();
+      if (!ctx) throw new Error("No active chat");
 
       switch (toolName) {
         case "telegram_send_file": {
@@ -71,23 +65,21 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
           if (!fs.existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
 
           const ext = path.extname(filePath).toLowerCase();
-          const file = new InputFile(filePath);
-          const opts = args.caption ? { caption: args.caption } : {};
-
-          if ([".jpg", ".jpeg", ".png", ".gif"].includes(ext)) {
-            await bot.api.sendPhoto(ctx.chatId, file, opts);
+          if (IMAGE_EXTENSIONS.has(ext)) {
+            await chat.sendPhoto(ctx.chatId, filePath, args.caption);
           } else {
-            await bot.api.sendDocument(ctx.chatId, file, opts);
+            await chat.sendFile(ctx.chatId, filePath, args.caption);
           }
 
-          return `✅ Sent ${path.basename(filePath)} to Telegram`;
+          return `✅ Sent ${path.basename(filePath)} to chat`;
         }
 
         case "telegram_react": {
+          // Platform-specific: requires direct Telegram bot access
           const targetId = args.message_id ?? ctx.replyToMessageId ?? ctx.messageId;
           if (!targetId) throw new Error("No message to react to");
 
-          await bot.api.setMessageReaction(ctx.chatId, targetId, [
+          await adapter.bot.api.setMessageReaction(ctx.chatId, targetId, [
             { type: "emoji", emoji: args.emoji },
           ]);
 

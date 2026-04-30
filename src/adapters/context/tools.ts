@@ -4,9 +4,9 @@
 
 import type { ToolCategory } from "../../mcp/types.js";
 import type { AcpPool } from "../../acp/pool.js";
-import type { TelegramAdapter } from "../chat/telegram/adapter.js";
+import type { ChatAdapter } from "../chat/types.js";
 
-export function createContextTools(pool: AcpPool, adapter: TelegramAdapter): ToolCategory {
+export function createContextTools(pool: AcpPool, adapter: ChatAdapter): ToolCategory {
   const getChatId = (): number => {
     const ctx = adapter.getActiveContext();
     if (!ctx) throw new Error("No active chat context");
