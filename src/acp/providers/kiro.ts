@@ -76,5 +76,10 @@ export function kiroProvider(): CliProvider {
     capabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
     parser: kiroParser,
     agentFlag: "--agent",
+    mapExtNotification(method, params) {
+      // Kiro sends session updates via _kiro.dev/session/update
+      if (method === "_kiro.dev/session/update") return params.update ?? null;
+      return null;
+    },
   };
 }

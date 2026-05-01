@@ -27,4 +27,6 @@ export interface CliProvider {
   parser: ResponseParser;
   /** CLI flag to select an agent (e.g. "--agent"). If absent, agent selection via CLI is not supported. */
   agentFlag?: string;
+  /** Map a vendor-specific extension notification to a session update, or null to ignore. */
+  mapExtNotification?(method: string, params: Record<string, any>): Record<string, any> | null;
 }

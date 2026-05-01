@@ -191,6 +191,15 @@ export class AcpClient extends EventEmitter {
       async createTerminal(params: acp.CreateTerminalRequest): Promise<acp.CreateTerminalResponse> {
         return { terminalId: `term-${Date.now()}` };
       },
+
+      async extNotification(method: string, params: Record<string, unknown>): Promise<void> {
+        const update = self.provider.mapExtNotification?.(method, params as any);
+        if (update) {
+          await this.sessionUpdate({ sessionId: (params as any).sessionId, update } as any);
+          return;
+        }
+        log.acp.debug({ method }, "ignored extension notification");
+      },
     };
   }
 
