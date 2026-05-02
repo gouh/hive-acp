@@ -99,15 +99,24 @@ export class JobManager extends EventEmitter {
     try {
       await client.start();
 
-      client.on("notification", (_method: string, params: any) => {
+      client.on("tool", (name: string, _id: string) => {
         this.emit("event", {
-          type: "task:progress",
+          type: "task:tool",
           jobId: job.id,
           chatId: job.chatId,
           task,
-          detail: params.update,
-          parser: provider.parser,
-        } as JobEvent);
+          toolName: name,
+        } satisfies JobEvent);
+      });
+
+      client.on("tool_update", (_id: string, status: string) => {
+        this.emit("event", {
+          type: "task:tool_update",
+          jobId: job.id,
+          chatId: job.chatId,
+          task,
+          toolStatus: status,
+        } satisfies JobEvent);
       });
 
       const graph = this.store.toContext();

@@ -1,8 +1,8 @@
 /**
  * ACP Client — powered by @agentclientprotocol/sdk.
  *
- * Wraps ClientSideConnection to provide a simplified API for hive-acp.
- * Provider-specific notification parsing is delegated to the CliProvider's ResponseParser.
+ * Uses SDK types directly for session updates. No custom ResponseParser needed.
+ * Emits typed events for the adapter to consume.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -17,13 +17,26 @@ import type { CliProvider } from "./providers/types.js";
 
 const WORKSPACE = process.env.HIVE_WORKSPACE || process.cwd();
 
+/** Typed events emitted by AcpClient. */
+export interface AcpEvents {
+  /** A text chunk from the agent's response. */
+  chunk: (text: string) => void;
+  /** A tool call started. */
+  tool: (name: string, toolCallId: string) => void;
+  /** A tool call status changed. */
+  tool_update: (toolCallId: string, status: string) => void;
+  /** A turn completed — full text of the turn. */
+  turn_end: (text: string) => void;
+  /** The agent process exited. */
+  exit: (code: number | null) => void;
+}
+
 export class AcpClient extends EventEmitter {
   private proc: ChildProcess | null = null;
   private conn: acp.ClientSideConnection | null = null;
   private sessionId: string | null = null;
   private promptLock: Promise<void> = Promise.resolve();
 
-  /** Context usage metrics — tracked across the lifetime of this client. */
   readonly metrics = {
     promptCount: 0,
     chunkCount: 0,
@@ -33,7 +46,6 @@ export class AcpClient extends EventEmitter {
     startedAt: Date.now(),
   };
 
-  /** Rough token estimate (~4 chars per token). */
   get estimatedTokens(): number {
     return Math.ceil(this.metrics.charCount / 4);
   }
@@ -61,13 +73,10 @@ export class AcpClient extends EventEmitter {
       if (msg) log.acp.debug(msg);
     });
     this.proc.on("exit", (code) => {
-      if (code !== null && code !== 0) {
-        log.acp.error(`agent exited (code ${code})`);
-      }
+      if (code !== null && code !== 0) log.acp.error(`agent exited (code ${code})`);
       this.emit("exit", code);
     });
 
-    // Create SDK connection
     const input = Writable.toWeb(this.proc.stdin!) as WritableStream<Uint8Array>;
     const output = Readable.toWeb(this.proc.stdout!) as ReadableStream<Uint8Array>;
     const stream = acp.ndJsonStream(input, output);
@@ -84,10 +93,7 @@ export class AcpClient extends EventEmitter {
     });
     log.acp.info({ server: init.agentInfo?.name, serverVersion: init.agentInfo?.version }, "initialized");
 
-    const session = await this.conn.newSession({
-      cwd: WORKSPACE,
-      mcpServers: [],
-    });
+    const session = await this.conn.newSession({ cwd: WORKSPACE, mcpServers: [] });
     this.sessionId = session.sessionId;
     log.acp.info({ sessionId: this.sessionId }, "session created");
 
@@ -95,22 +101,16 @@ export class AcpClient extends EventEmitter {
   }
 
   prompt(content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>): Promise<string> {
-    if (!this.conn || !this.sessionId) {
-      return Promise.reject(new Error("ACP client not started"));
-    }
+    if (!this.conn || !this.sessionId) return Promise.reject(new Error("ACP client not started"));
 
     const run = async (): Promise<string> => {
       this.metrics.promptCount++;
-      this._promptChunks = [];
-      this._promptFullMessage = null;
+      this._chunks = [];
+      this._fullMessage = null;
 
-      await this.conn!.prompt({
-        sessionId: this.sessionId!,
-        prompt: content as any,
-      });
+      await this.conn!.prompt({ sessionId: this.sessionId!, prompt: content as any });
 
-      // prompt() resolves after all sessionUpdate callbacks have been called.
-      return this._promptFullMessage ?? this._promptChunks.join("");
+      return this._fullMessage ?? this._chunks.join("");
     };
 
     const result = this.promptLock.then(() => run());
@@ -118,84 +118,92 @@ export class AcpClient extends EventEmitter {
     return result;
   }
 
-  // Accumulator for the current prompt's text
-  private _promptChunks: string[] = [];
-  private _promptFullMessage: string | null = null;
+  private _chunks: string[] = [];
+  private _fullMessage: string | null = null;
 
   private createClientHandler(): acp.Client {
     const self = this;
-    const { parser } = this.provider;
+    const cleanTitle = this.provider.cleanToolTitle ?? ((t: string) => t);
 
     return {
       async sessionUpdate(params: acp.SessionNotification): Promise<void> {
-        const u = params.update as Record<string, any>;
-        if (!u) return;
+        const update = params.update as acp.SessionUpdate;
+        if (!update) return;
 
-        log.acp.debug({ sessionUpdate: u.sessionUpdate }, "session update received");
+        log.acp.debug({ sessionUpdate: update.sessionUpdate }, "session update received");
 
-        // Emit raw notification for adapter (streaming, tool progress)
-        self.emit("notification", "session/update", { update: u });
+        switch (update.sessionUpdate) {
+          case "agent_message_chunk": {
+            const text = (update.content as any)?.text;
+            if (text) {
+              self._chunks.push(text);
+              self.metrics.chunkCount++;
+              self.metrics.charCount += text.length;
+              self.emit("chunk", text);
+            }
+            break;
+          }
 
-        // Track tool calls
-        const tool = parser.toolCall(u);
-        if (tool) self.metrics.toolCalls.push(tool);
+          case "tool_call": {
+            const name = cleanTitle(update.title || "tool");
+            self.metrics.toolCalls.push(name);
+            self.emit("tool", name, update.toolCallId);
+            break;
+          }
 
-        // Turn boundary — emit turn_message and reset
-        if (parser.isTurnEnd(u)) {
-          const text = self._promptFullMessage ?? self._promptChunks.join("");
-          if (text) self.emit("turn_message", text);
-          self._promptChunks = [];
-          self._promptFullMessage = null;
-          return;
-        }
+          case "tool_call_update": {
+            const status = update.status ?? "";
+            self.emit("tool_update", update.toolCallId, status);
+            break;
+          }
 
-        // Accumulate chunks
-        const chunk = parser.messageChunk(u);
-        if (chunk !== null) {
-          self._promptChunks.push(chunk);
-          self.metrics.chunkCount++;
-          self.metrics.charCount += chunk.length;
-        }
-
-        // Full message
-        const full = parser.fullMessage(u);
-        if (full !== null) {
-          self._promptFullMessage = full;
+          // agent_message = full message (some providers send this instead of/after chunks)
+          // We treat it as the authoritative full text for the turn.
+          default: {
+            const u = update as any;
+            if (u.sessionUpdate === "agent_message" && u.content?.text) {
+              self._fullMessage = u.content.text;
+            }
+            // TurnEnd (Kiro) — emit turn boundary
+            if (u.sessionUpdate === "TurnEnd" || u.sessionUpdate === "turn_end") {
+              const text = self._fullMessage ?? self._chunks.join("");
+              if (text) self.emit("turn_end", text);
+              self._chunks = [];
+              self._fullMessage = null;
+            }
+            break;
+          }
         }
       },
 
       async requestPermission(params: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse> {
-        const allowOption = params.options.find((o) => o.kind === "allow_always")
+        const opt = params.options.find((o) => o.kind === "allow_always")
           || params.options.find((o) => o.kind === "allow_once")
           || params.options[0];
-        return { outcome: { outcome: "selected", optionId: allowOption.optionId } };
+        return { outcome: { outcome: "selected", optionId: opt.optionId } };
       },
 
       async readTextFile(params: acp.ReadTextFileRequest): Promise<acp.ReadTextFileResponse> {
-        const p = params.path.startsWith("/")
-          ? params.path
-          : path.join(WORKSPACE, params.path);
+        const p = params.path.startsWith("/") ? params.path : path.join(WORKSPACE, params.path);
         return { content: fs.readFileSync(p, "utf-8") };
       },
 
       async writeTextFile(params: acp.WriteTextFileRequest): Promise<acp.WriteTextFileResponse> {
-        const p = params.path.startsWith("/")
-          ? params.path
-          : path.join(WORKSPACE, params.path);
+        const p = params.path.startsWith("/") ? params.path : path.join(WORKSPACE, params.path);
         fs.mkdirSync(path.dirname(p), { recursive: true });
         fs.writeFileSync(p, params.content, "utf-8");
         self.metrics.filesModified.push(p);
         return {};
       },
 
-      async createTerminal(params: acp.CreateTerminalRequest): Promise<acp.CreateTerminalResponse> {
+      async createTerminal(_params: acp.CreateTerminalRequest): Promise<acp.CreateTerminalResponse> {
         return { terminalId: `term-${Date.now()}` };
       },
 
       async extNotification(method: string, params: Record<string, unknown>): Promise<void> {
-        const update = self.provider.mapExtNotification?.(method, params as any);
-        if (update) {
-          await this.sessionUpdate({ sessionId: (params as any).sessionId, update } as any);
+        const mapped = self.provider.mapExtNotification?.(method, params as any);
+        if (mapped) {
+          await this.sessionUpdate({ sessionId: (params as any).sessionId, update: mapped } as any);
           return;
         }
         log.acp.debug({ method }, "ignored extension notification");
@@ -219,16 +227,11 @@ export class AcpClient extends EventEmitter {
     try {
       const raw = await this.prompt([{
         type: "text",
-        text: "Extract key facts from our conversation as subject|predicate|object triples. One per line. Only concrete facts. Max 10.\nExample: Defensa|uses|PostgreSQL\n\nRespond ONLY with the triples, no preamble.",
+        text: "Extract key facts from our conversation as subject|predicate|object triples. One per line. Only concrete facts. Max 10.\nExample: ProjectX|uses|PostgreSQL\n\nRespond ONLY with the triples, no preamble.",
       }]);
-      return raw
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.includes("|"))
-        .map((line) => {
-          const [s, p, o] = line.split("|").map((x) => x.trim());
-          return s && p && o ? { s, p, o } : null;
-        })
+      return raw.split("\n")
+        .map((l) => l.trim()).filter((l) => l.includes("|"))
+        .map((l) => { const [s, p, o] = l.split("|").map((x) => x.trim()); return s && p && o ? { s, p, o } : null; })
         .filter((t): t is { s: string; p: string; o: string } => t !== null);
     } catch (err: any) {
       log.acp.warn("Failed to extract triples: %s", err.message);
@@ -238,20 +241,12 @@ export class AcpClient extends EventEmitter {
 
   async ping(): Promise<boolean> {
     try {
-      if (!this.proc?.stdin?.writable) return false;
-      // SDK doesn't expose ping directly, use a lightweight prompt check
-      // For now, check if the process is alive
-      return this.proc?.exitCode === null;
-    } catch {
-      return false;
-    }
+      return this.proc?.exitCode === null && !!this.proc?.stdin?.writable;
+    } catch { return false; }
   }
 
   stop(): void {
-    if (this.proc) {
-      this.proc.kill();
-      this.proc = null;
-    }
+    if (this.proc) { this.proc.kill(); this.proc = null; }
     this.conn = null;
   }
 }

@@ -270,25 +270,10 @@ export class TelegramAdapter implements ChatAdapter {
     const throttle = new OutboundThrottle(2000);
 
     jobManager.on("event", (evt: JobEvent) => {
-      if (evt.type === "task:progress" && evt.detail && evt.task) {
-        const parser = evt.parser ?? pool.cliProvider.parser;
-        const toolName = parser.toolCall(evt.detail);
-        const toolUpdate = parser.toolCallUpdate(evt.detail);
-        if (!toolName && !toolUpdate) return;
-
+      if (evt.type === "task:tool" && evt.task && evt.toolName) {
         const key = evt.task.id;
         const state = subagentMsgs.get(key) || { msgId: 0, tools: [] };
-
-        if (toolName) {
-          state.tools.push(escapeHtml(toolName));
-        }
-        if (toolUpdate && (toolUpdate.status === "completed" || toolUpdate.status === "failed")) {
-          const last = state.tools.length - 1;
-          if (last >= 0) {
-            const icon = toolUpdate.status === "completed" ? "✅" : "❌";
-            state.tools[last] = `${icon} ${state.tools[last]}`;
-          }
-        }
+        state.tools.push(escapeHtml(evt.toolName));
 
         const lines = state.tools.slice(-5).map((t) =>
           t.startsWith("✅") || t.startsWith("❌") ? `<i>${t}</i>` : `⚙️ <i>${t}</i>`
@@ -305,6 +290,23 @@ export class TelegramAdapter implements ChatAdapter {
           );
         }
         subagentMsgs.set(key, state);
+        return;
+      }
+
+      if (evt.type === "task:tool_update" && evt.task && evt.toolStatus) {
+        const key = evt.task.id;
+        const state = subagentMsgs.get(key);
+        if (!state || !state.msgId) return;
+
+        if (evt.toolStatus === "completed" || evt.toolStatus === "failed") {
+          const icon = evt.toolStatus === "completed" ? "✅" : "❌";
+          const last = state.tools.length - 1;
+          if (last >= 0) state.tools[last] = `${icon} ${state.tools[last]}`;
+          const lines = state.tools.slice(-5).map((t) =>
+            t.startsWith("✅") || t.startsWith("❌") ? `<i>${t}</i>` : `⚙️ <i>${t}</i>`
+          );
+          this.editHtml(evt.chatId, state.msgId, lines.join("\n"), throttle);
+        }
         return;
       }
 
@@ -375,8 +377,7 @@ export class TelegramAdapter implements ChatAdapter {
 
     let typingInterval: ReturnType<typeof setInterval> | null = null;
     let acpInstance: any = null;
-    let notificationListener: ((method: string, params: any) => void) | null = null;
-    let turnListener: ((_text: string) => Promise<void>) | null = null;
+    const eventCleanups: Array<() => void> = [];
     const throttle = new OutboundThrottle(2000);
 
     try {
@@ -405,8 +406,7 @@ export class TelegramAdapter implements ChatAdapter {
         prompt[0].text = `${preamble}\n\n${prompt[0].text}`;
       }
 
-      // Accumulation state — no streaming edits, just collect and send at end
-      const { parser } = this.pool.cliProvider;
+      // Accumulation state
       let streamBuffer = "";
       let totalStreamedChars = 0;
 
@@ -414,52 +414,39 @@ export class TelegramAdapter implements ChatAdapter {
       let toolMsgId: number | null = null;
       const toolNames: string[] = [];
 
-      notificationListener = async (_method: string, params: any) => {
-        const u = params.update;
-        if (!u) return;
+      // Typed event listeners
+      const onChunk = (text: string) => {
+        streamBuffer += text;
+        totalStreamedChars += text.length;
+      };
 
-        // Tool call — show progress
-        const toolName = parser.toolCall(u);
-        if (toolName) {
-          toolNames.push(escapeHtml(toolName));
-          const lines = toolNames.slice(-6).map((t) => `⚙️ <i>${t}</i>`);
-          const toolText = lines.join("\n");
-          if (toolMsgId) {
-            this.editHtml(chatId, toolMsgId, toolText, throttle);
-          } else if (throttle.tryNow()) {
-            try {
-              const m = await this.bot.api.sendMessage(chatId, toolText, { parse_mode: "HTML" });
-              toolMsgId = m.message_id;
-            } catch { /* throttled or error */ }
-          }
-          return;
+      const onTool = (name: string, _id: string) => {
+        toolNames.push(escapeHtml(name));
+        const lines = toolNames.slice(-6).map((t) => `⚙️ <i>${t}</i>`);
+        const toolText = lines.join("\n");
+        if (toolMsgId) {
+          this.editHtml(chatId, toolMsgId, toolText, throttle);
+        } else if (throttle.tryNow()) {
+          this.bot.api.sendMessage(chatId, toolText, { parse_mode: "HTML" })
+            .then((m) => { toolMsgId = m.message_id; })
+            .catch(() => {});
         }
+      };
 
-        // Tool update — update status icon
-        const toolUpdate = parser.toolCallUpdate(u);
-        if (toolUpdate && toolMsgId && (toolUpdate.status === "completed" || toolUpdate.status === "failed")) {
-          const icon = toolUpdate.status === "completed" ? "✅" : "❌";
-          const last = toolNames[toolNames.length - 1] || "";
-          toolNames[toolNames.length - 1] = `${icon} ${last}`;
+      const onToolUpdate = (_id: string, status: string) => {
+        if (toolMsgId && (status === "completed" || status === "failed")) {
+          const icon = status === "completed" ? "✅" : "❌";
+          const last = toolNames.length - 1;
+          if (last >= 0) toolNames[last] = `${icon} ${toolNames[last]}`;
           const lines = toolNames.slice(-6).map((t) =>
             t.startsWith("✅") || t.startsWith("❌") ? `<i>${t}</i>` : `⚙️ <i>${t}</i>`
           );
           this.editHtml(chatId, toolMsgId, lines.join("\n"), throttle);
-          return;
-        }
-
-        // Message chunk — accumulate (no Telegram send)
-        const chunk = parser.messageChunk(u);
-        if (chunk !== null) {
-          streamBuffer += chunk;
-          totalStreamedChars += chunk.length;
         }
       };
 
-      turnListener = async (_text: string) => {
-        // Turn ended — send accumulated text as complete message
+      const onTurnEnd = async () => {
         if (streamBuffer) {
-          // Clean up tool progress message
           if (toolMsgId) {
             this.bot.api.deleteMessage(chatId, toolMsgId).catch(() => {});
             toolMsgId = null;
@@ -470,8 +457,16 @@ export class TelegramAdapter implements ChatAdapter {
         }
       };
 
-      acp.on("notification", notificationListener);
-      acp.on("turn_message", turnListener);
+      acp.on("chunk", onChunk);
+      acp.on("tool", onTool);
+      acp.on("tool_update", onToolUpdate);
+      acp.on("turn_end", onTurnEnd);
+      eventCleanups.push(
+        () => acp.removeListener("chunk", onChunk),
+        () => acp.removeListener("tool", onTool),
+        () => acp.removeListener("tool_update", onToolUpdate),
+        () => acp.removeListener("turn_end", onTurnEnd),
+      );
 
       const response = await acp.prompt(prompt);
 
@@ -484,7 +479,6 @@ export class TelegramAdapter implements ChatAdapter {
       if (streamBuffer) {
         await this.sendHtml(chatId, mdToHtml(streamBuffer), throttle);
       } else if (totalStreamedChars === 0) {
-        // Nothing was streamed — send the full response
         await this.sendHtml(chatId, mdToHtml(response || "_(no response)_"), throttle);
       }
 
@@ -497,10 +491,7 @@ export class TelegramAdapter implements ChatAdapter {
       }
       await ctx.reply(`❌ Error: ${err.message}`);
     } finally {
-      if (acpInstance) {
-        if (notificationListener) acpInstance.removeListener("notification", notificationListener);
-        if (turnListener) acpInstance.removeListener("turn_message", turnListener);
-      }
+      for (const cleanup of eventCleanups) cleanup();
       if (typingInterval) clearInterval(typingInterval);
       this.pool.setBusy(chatId, false);
       this.processing.delete(userId);

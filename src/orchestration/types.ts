@@ -25,16 +25,14 @@ export interface Job {
   finishedAt?: number;
 }
 
-import type { ResponseParser } from "../acp/providers/types.js";
-
 export interface JobEvent {
-  type: "task:complete" | "task:failed" | "task:progress" | "job:complete";
+  type: "task:complete" | "task:failed" | "task:tool" | "task:tool_update" | "job:complete";
   jobId: string;
   chatId: number;
   task?: TaskEntry;
   job?: Job;
-  /** For task:progress — the raw session update from the subagent. */
-  detail?: Record<string, any>;
-  /** For task:progress — the parser for the subagent's provider. */
-  parser?: ResponseParser;
+  /** For task:tool — the tool name. */
+  toolName?: string;
+  /** For task:tool_update — the tool status. */
+  toolStatus?: string;
 }
