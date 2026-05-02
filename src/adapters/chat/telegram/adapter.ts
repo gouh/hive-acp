@@ -1,9 +1,15 @@
 /**
  * Telegram Adapter — connects Telegram Bot API to the ACP client via grammy.
  * Implements the platform-agnostic ChatAdapter interface.
+ *
+ * Delivery strategy (inspired by Telegram-ACP):
+ * - HTML as primary parse mode (more predictable than Markdown)
+ * - OutboundThrottle with RetryAfter handling
+ * - Accumulate chunks, send complete message at end (no editMessageText streaming)
+ * - UTF-8 safe message splitting
  */
 
-import { Bot, type Context, InputFile } from "grammy";
+import { Bot, type Context, InputFile, GrammyError } from "grammy";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -16,25 +22,135 @@ import { log } from "../../../utils/logger.js";
 const TELEGRAM_MAX_LENGTH = 4096;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]);
 
-/** Convert standard Markdown to Telegram Markdown v1. */
-function toTelegramMd(text: string): string {
-  return text.replace(/```[\s\S]*?```|`[^`]+`|\*\*(.+?)\*\*/g, (m, bold) =>
-    bold !== undefined ? `*${bold}*` : m,
-  )
-  .replace(/```[\s\S]*?```|`[^`]+`|\\([_*[\]()~`>#+\-=|{}.!])/g, (m, ch) =>
-    ch !== undefined ? ch : m,
-  );
+// ── HTML formatting ──────────────────────────────────────────
+
+/** Escape text for Telegram HTML parse mode. */
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Escape underscores for Telegram Markdown italic formatting. */
-function escapeMd(text: string): string {
-  return text.replace(/_/g, "\\_");
+/**
+ * Convert agent Markdown to Telegram HTML.
+ * Handles: **bold**, *italic*, `code`, ```blocks```, [links](url), ~~strike~~
+ * Preserves code blocks untouched.
+ */
+function mdToHtml(text: string): string {
+  const codeBlocks: string[] = [];
+
+  // Extract code blocks first
+  let result = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
+    const idx = codeBlocks.length;
+    const escaped = escapeHtml(code.replace(/\n$/, ""));
+    codeBlocks.push(lang ? `<pre><code class="language-${lang}">${escaped}</code></pre>` : `<pre>${escaped}</pre>`);
+    return `\x00CB${idx}\x00`;
+  });
+
+  // Extract inline code
+  result = result.replace(/`([^`]+)`/g, (_m, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push(`<code>${escapeHtml(code)}</code>`);
+    return `\x00CB${idx}\x00`;
+  });
+
+  // Escape HTML in remaining text
+  result = escapeHtml(result);
+
+  // Markdown → HTML conversions
+  result = result.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  result = result.replace(/\*(.+?)\*/g, "<i>$1</i>");
+  result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+  // Strip MarkdownV2 escapes (e.g. \. \- \( \))
+  result = result.replace(/\\([_*[\]()~`>#+\-=|{}.!])/g, "$1");
+
+  // Restore code blocks
+  result = result.replace(/\x00CB(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)]);
+
+  return result;
 }
 
-/** Returns true if the error is a benign "message not modified" from Telegram. */
-function isNotModified(err: any): boolean {
-  return typeof err?.message === "string" && err.message.includes("message is not modified");
+// ── OutboundThrottle ─────────────────────────────────────────
+
+/** Rate-limit outbound Telegram API calls with RetryAfter handling. */
+class OutboundThrottle {
+  private nextAllowedAt = 0;
+
+  constructor(private minIntervalMs = 2000) {}
+
+  /** Wait until we can send. */
+  async wait(): Promise<void> {
+    const now = Date.now();
+    if (this.nextAllowedAt > now) {
+      await new Promise((r) => setTimeout(r, this.nextAllowedAt - now));
+    }
+    this.nextAllowedAt = Date.now() + this.minIntervalMs;
+  }
+
+  /** Check if we can send now (non-blocking). */
+  tryNow(): boolean {
+    const now = Date.now();
+    if (this.nextAllowedAt > now) return false;
+    this.nextAllowedAt = now + this.minIntervalMs;
+    return true;
+  }
+
+  /** Defer next send by a duration (e.g. after RetryAfter). */
+  defer(ms: number): void {
+    const retryAt = Date.now() + ms;
+    if (retryAt > this.nextAllowedAt) this.nextAllowedAt = retryAt;
+  }
 }
+
+/** Extract RetryAfter seconds from a GrammyError, or null. */
+function getRetryAfter(err: any): number | null {
+  if (err instanceof GrammyError && err.error_code === 429) {
+    const match = err.description?.match(/retry after (\d+)/i);
+    return match ? parseInt(match[1]) : 5;
+  }
+  return null;
+}
+
+// ── UTF-8 safe message splitting ─────────────────────────────
+
+/** Split text into chunks that fit within maxLen, respecting UTF-8 char boundaries. */
+function splitMessage(text: string, maxLen = TELEGRAM_MAX_LENGTH): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // Find a safe split point: prefer double newline, then single newline, then maxLen
+    let splitAt = remaining.lastIndexOf("\n\n", maxLen);
+    if (splitAt <= 0) splitAt = remaining.lastIndexOf("\n", maxLen);
+    if (splitAt <= 0) splitAt = maxLen;
+
+    // Ensure we don't split in the middle of a multi-byte character
+    while (splitAt > 0 && isContinuationByte(remaining, splitAt)) {
+      splitAt--;
+    }
+
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).replace(/^\n+/, "");
+  }
+
+  return chunks;
+}
+
+/** Check if byte at position is a UTF-8 continuation byte (0x80-0xBF). */
+function isContinuationByte(str: string, pos: number): boolean {
+  const code = str.charCodeAt(pos);
+  // Surrogate pair check — don't split between high and low surrogates
+  return code >= 0xDC00 && code <= 0xDFFF;
+}
+
+// ── Adapter ──────────────────────────────────────────────────
 
 export class TelegramAdapter implements ChatAdapter {
   readonly bot: Bot;
@@ -70,7 +186,6 @@ export class TelegramAdapter implements ChatAdapter {
     log.telegram.info("listening for messages");
   }
 
-  /** Set a function that builds dynamic context injected into every user message. */
   setContextBuilder(fn: (chatId: number) => string | null): void {
     this.contextBuilder = fn;
   }
@@ -89,10 +204,70 @@ export class TelegramAdapter implements ChatAdapter {
     await this.bot.api.sendDocument(chatId, new InputFile(filePath), caption ? { caption } : {});
   }
 
+  // ── Throttled send helpers ─────────────────────────────────
+
+  /** Send an HTML message with throttle and RetryAfter handling. */
+  private async sendHtml(chatId: number, text: string, throttle: OutboundThrottle): Promise<void> {
+    const chunks = splitMessage(text);
+    for (const chunk of chunks) {
+      await this.sendSingleHtml(chatId, chunk, throttle);
+    }
+  }
+
+  private async sendSingleHtml(chatId: number, text: string, throttle: OutboundThrottle): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await throttle.wait();
+      try {
+        await this.bot.api.sendMessage(chatId, text, { parse_mode: "HTML" });
+        return;
+      } catch (err: any) {
+        const retryAfter = getRetryAfter(err);
+        if (retryAfter !== null) {
+          log.telegram.warn({ chatId, retryAfter }, "rate limited, backing off");
+          throttle.defer((retryAfter + 1) * 1000);
+          continue;
+        }
+        // HTML parse failed — try plain text
+        log.telegram.warn({ chatId, err: err.message }, "HTML send failed, trying plain text");
+        try {
+          await this.bot.api.sendMessage(chatId, text);
+          return;
+        } catch (err2: any) {
+          log.telegram.error({ chatId, err: err2.message }, "plain text send also failed");
+          return;
+        }
+      }
+    }
+  }
+
+  /** Edit an HTML message with throttle. Non-critical — drops on throttle. */
+  private async editHtml(chatId: number, msgId: number, text: string, throttle: OutboundThrottle): Promise<boolean> {
+    if (!throttle.tryNow()) return false;
+    try {
+      await this.bot.api.editMessageText(chatId, msgId, text, { parse_mode: "HTML" });
+      return true;
+    } catch (err: any) {
+      if (err.message?.includes("message is not modified")) return true;
+      const retryAfter = getRetryAfter(err);
+      if (retryAfter !== null) {
+        throttle.defer((retryAfter + 1) * 1000);
+        return false;
+      }
+      // HTML failed — try plain
+      try {
+        await this.bot.api.editMessageText(chatId, msgId, text);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+
   // ── ChatAdapter: bindJobManager ────────────────────────────
 
   bindJobManager(jobManager: JobManager, pool: AcpPool): void {
     const subagentMsgs = new Map<string, { msgId: number; tools: string[] }>();
+    const throttle = new OutboundThrottle(2000);
 
     jobManager.on("event", (evt: JobEvent) => {
       if (evt.type === "task:progress" && evt.detail && evt.task) {
@@ -105,7 +280,7 @@ export class TelegramAdapter implements ChatAdapter {
         const state = subagentMsgs.get(key) || { msgId: 0, tools: [] };
 
         if (toolName) {
-          state.tools.push(escapeMd(toolName));
+          state.tools.push(escapeHtml(toolName));
         }
         if (toolUpdate && (toolUpdate.status === "completed" || toolUpdate.status === "failed")) {
           const last = state.tools.length - 1;
@@ -115,13 +290,19 @@ export class TelegramAdapter implements ChatAdapter {
           }
         }
 
-        const text = `🤖 _${escapeMd(evt.task.agent)}_\n${state.tools.slice(-5).map((t) => t.startsWith("✅") || t.startsWith("❌") ? `_${t}_` : `⚙️ _${t}_`).join("\n")}`;
+        const lines = state.tools.slice(-5).map((t) =>
+          t.startsWith("✅") || t.startsWith("❌") ? `<i>${t}</i>` : `⚙️ <i>${t}</i>`
+        );
+        const text = `🤖 <i>${escapeHtml(evt.task.agent)}</i>\n${lines.join("\n")}`;
+
         if (state.msgId) {
-          this.bot.api.editMessageText(evt.chatId, state.msgId, text, { parse_mode: "Markdown" }).catch(() => {});
+          this.editHtml(evt.chatId, state.msgId, text, throttle);
         } else {
-          this.bot.api.sendMessage(evt.chatId, text, { parse_mode: "Markdown" })
-            .then((m) => { state.msgId = m.message_id; })
-            .catch(() => {});
+          throttle.wait().then(() =>
+            this.bot.api.sendMessage(evt.chatId, text, { parse_mode: "HTML" })
+              .then((m) => { state.msgId = m.message_id; })
+              .catch(() => {})
+          );
         }
         subagentMsgs.set(key, state);
         return;
@@ -196,6 +377,7 @@ export class TelegramAdapter implements ChatAdapter {
     let acpInstance: any = null;
     let notificationListener: ((method: string, params: any) => void) | null = null;
     let turnListener: ((_text: string) => Promise<void>) | null = null;
+    const throttle = new OutboundThrottle(2000);
 
     try {
       this.activeCtx.set(chatId, {
@@ -223,130 +405,68 @@ export class TelegramAdapter implements ChatAdapter {
         prompt[0].text = `${preamble}\n\n${prompt[0].text}`;
       }
 
-      // Streaming state
+      // Accumulation state — no streaming edits, just collect and send at end
       const { parser } = this.pool.cliProvider;
-      let streamMsgId: number | null = null;
       let streamBuffer = "";
-      let lastEditedText = "";
       let totalStreamedChars = 0;
-      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-      const SPLIT_THRESHOLD = 3000;
 
       // Tool progress state
       let toolMsgId: number | null = null;
       const toolNames: string[] = [];
 
-      /** Adaptive debounce: fast at start, slower as text grows. */
-      const debounceMs = () => streamBuffer.length < 500 ? 400 : 1200;
-
-      const flushStream = async (final = false) => {
-        if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
-        if (!streamBuffer) return;
-        if (!final && streamBuffer === lastEditedText) return;
-
-        const raw = streamBuffer.slice(0, TELEGRAM_MAX_LENGTH);
-        const text = final ? toTelegramMd(raw) : raw;
-        lastEditedText = text;
-        try {
-          if (streamMsgId) {
-            if (final) {
-              await this.bot.api.editMessageText(chatId, streamMsgId, text, { parse_mode: "Markdown" })
-                .catch((err) => {
-                  if (isNotModified(err)) return;
-                  log.telegram.warn({ chatId, err: err.message }, "markdown edit failed, retrying plain");
-                  return this.bot.api.editMessageText(chatId, streamMsgId!, raw).catch((err2) => {
-                    if (!isNotModified(err2)) log.telegram.error({ chatId, err: err2.message }, "plain edit also failed");
-                  });
-                });
-            } else {
-              await this.bot.api.editMessageText(chatId, streamMsgId, text).catch(() => {});
-            }
-          } else {
-            const sent = await this.bot.api.sendMessage(chatId, text);
-            streamMsgId = sent.message_id;
-          }
-        } catch (err: any) {
-          log.telegram.error({ chatId, err: err.message }, "flushStream failed");
-        }
-      };
-
-      /** Split: finalize current message and start a new one. */
-      const splitStream = async () => {
-        await flushStream(true);
-        streamMsgId = null;
-        streamBuffer = "";
-        lastEditedText = "";
-      };
-
-      const scheduleFlush = () => {
-        if (debounceTimer) return;
-        debounceTimer = setTimeout(() => { debounceTimer = null; flushStream(); }, debounceMs());
-      };
-
       notificationListener = async (_method: string, params: any) => {
         const u = params.update;
         if (!u) return;
 
+        // Tool call — show progress
         const toolName = parser.toolCall(u);
         if (toolName) {
-          if (streamBuffer && streamMsgId) {
-            await flushStream(true);
-            streamMsgId = null;
-            streamBuffer = "";
-            lastEditedText = "";
-          }
-          toolNames.push(escapeMd(toolName));
-          const toolText = toolNames.slice(-6).map((t) => `⚙️ _${t}_`).join("\n");
+          toolNames.push(escapeHtml(toolName));
+          const lines = toolNames.slice(-6).map((t) => `⚙️ <i>${t}</i>`);
+          const toolText = lines.join("\n");
           if (toolMsgId) {
-            this.bot.api.editMessageText(chatId, toolMsgId, toolText, { parse_mode: "Markdown" }).catch(() => {});
-          } else {
-            this.bot.api.sendMessage(chatId, toolText, { parse_mode: "Markdown" })
-              .then((m) => { toolMsgId = m.message_id; })
-              .catch(() => {});
+            this.editHtml(chatId, toolMsgId, toolText, throttle);
+          } else if (throttle.tryNow()) {
+            try {
+              const m = await this.bot.api.sendMessage(chatId, toolText, { parse_mode: "HTML" });
+              toolMsgId = m.message_id;
+            } catch { /* throttled or error */ }
           }
           return;
         }
 
+        // Tool update — update status icon
         const toolUpdate = parser.toolCallUpdate(u);
         if (toolUpdate && toolMsgId && (toolUpdate.status === "completed" || toolUpdate.status === "failed")) {
           const icon = toolUpdate.status === "completed" ? "✅" : "❌";
           const last = toolNames[toolNames.length - 1] || "";
-          const prev = toolNames.slice(-6, -1).map((t) => `⚙️ _${t}_`);
-          const toolText = [...prev, `${icon} _${last}_`].join("\n");
-          this.bot.api.editMessageText(chatId, toolMsgId, toolText, { parse_mode: "Markdown" }).catch(() => {});
+          toolNames[toolNames.length - 1] = `${icon} ${last}`;
+          const lines = toolNames.slice(-6).map((t) =>
+            t.startsWith("✅") || t.startsWith("❌") ? `<i>${t}</i>` : `⚙️ <i>${t}</i>`
+          );
+          this.editHtml(chatId, toolMsgId, lines.join("\n"), throttle);
           return;
         }
 
+        // Message chunk — accumulate (no Telegram send)
         const chunk = parser.messageChunk(u);
         if (chunk !== null) {
+          streamBuffer += chunk;
+          totalStreamedChars += chunk.length;
+        }
+      };
+
+      turnListener = async (_text: string) => {
+        // Turn ended — send accumulated text as complete message
+        if (streamBuffer) {
+          // Clean up tool progress message
           if (toolMsgId) {
             this.bot.api.deleteMessage(chatId, toolMsgId).catch(() => {});
             toolMsgId = null;
             toolNames.length = 0;
           }
-          streamBuffer += chunk;
-          totalStreamedChars += chunk.length;
-          // Split into a new message when buffer gets large
-          if (streamBuffer.length > SPLIT_THRESHOLD && streamMsgId) {
-            splitStream();
-          } else {
-            scheduleFlush();
-          }
-        }
-      };
-
-      turnListener = async (_text: string) => {
-        log.telegram.debug({ chatId, streamMsgId, bufferLen: streamBuffer.length }, "turn end");
-        if (streamBuffer) {
-          await flushStream(true);
-        }
-        streamMsgId = null;
-        streamBuffer = "";
-        lastEditedText = "";
-        if (toolMsgId) {
-          this.bot.api.deleteMessage(chatId, toolMsgId).catch(() => {});
-          toolMsgId = null;
-          toolNames.length = 0;
+          await this.sendHtml(chatId, mdToHtml(streamBuffer), throttle);
+          streamBuffer = "";
         }
       };
 
@@ -355,36 +475,32 @@ export class TelegramAdapter implements ChatAdapter {
 
       const response = await acp.prompt(prompt);
 
+      // Clean up tool progress
       if (toolMsgId) {
         this.bot.api.deleteMessage(chatId, toolMsgId).catch(() => {});
       }
 
-      if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
-
-      // Final delivery: flush any remaining streamed content with Markdown,
-      // or send the full response if nothing was streamed.
-      if (totalStreamedChars > 0 && streamBuffer) {
-        await flushStream(true);
+      // Send any remaining accumulated text
+      if (streamBuffer) {
+        await this.sendHtml(chatId, mdToHtml(streamBuffer), throttle);
       } else if (totalStreamedChars === 0) {
-        await this.sendResponse(chatId, response || "_(no response)_");
+        // Nothing was streamed — send the full response
+        await this.sendHtml(chatId, mdToHtml(response || "_(no response)_"), throttle);
       }
 
       log.telegram.info({ chatId, userId, preview: (response || "").slice(0, 100) }, "response sent");
     } catch (err: any) {
       log.telegram.error({ err, chatId }, "message handling failed");
-      // Kill the dead client so the next message spawns a fresh one
       if (err.message?.includes("Timeout") || err.message?.includes("exited")) {
         log.telegram.warn({ chatId }, "recycling dead client");
         this.pool.kill(chatId);
       }
       await ctx.reply(`❌ Error: ${err.message}`);
     } finally {
-      // Clean up listeners to prevent leaks
       if (acpInstance) {
         if (notificationListener) acpInstance.removeListener("notification", notificationListener);
         if (turnListener) acpInstance.removeListener("turn_message", turnListener);
       }
-      // Always clear typing interval
       if (typingInterval) clearInterval(typingInterval);
       this.pool.setBusy(chatId, false);
       this.processing.delete(userId);
@@ -474,29 +590,7 @@ export class TelegramAdapter implements ChatAdapter {
   }
 
   async sendResponse(chatId: number, text: string): Promise<void> {
-    const parts: string[] = [];
-    let remaining = toTelegramMd(text);
-
-    while (remaining.length > TELEGRAM_MAX_LENGTH) {
-      let splitAt = remaining.lastIndexOf("\n\n", TELEGRAM_MAX_LENGTH);
-      if (splitAt === -1) splitAt = remaining.lastIndexOf("\n", TELEGRAM_MAX_LENGTH);
-      if (splitAt === -1) splitAt = TELEGRAM_MAX_LENGTH;
-      parts.push(remaining.slice(0, splitAt));
-      remaining = remaining.slice(splitAt).trimStart();
-    }
-    parts.push(remaining);
-
-    for (const part of parts) {
-      try {
-        await this.bot.api.sendMessage(chatId, part, { parse_mode: "Markdown" });
-      } catch {
-        try {
-          await this.bot.api.sendMessage(chatId, part, { parse_mode: "HTML" });
-        } catch {
-          log.telegram.warn("markdown and HTML parse failed, sending as plain text");
-          await this.bot.api.sendMessage(chatId, part);
-        }
-      }
-    }
+    const throttle = new OutboundThrottle(2000);
+    await this.sendHtml(chatId, mdToHtml(text), throttle);
   }
 }
