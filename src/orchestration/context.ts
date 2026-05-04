@@ -3,9 +3,11 @@
  *
  * Builds dynamic context injected into every user message to the orchestrator.
  * Ensures the orchestrator always has fresh state even after LLM context compaction.
+ *
+ * Note: Knowledge graph is injected separately by the pool on session creation,
+ * so it's not duplicated here.
  */
 
-import type { TripleStore } from "../memory/store.js";
 import type { JobManager } from "../orchestration/job-manager.js";
 import type { ProviderRegistry } from "../acp/registry.js";
 import type { Job } from "../orchestration/types.js";
@@ -33,7 +35,6 @@ export function buildOrchestratorContext(
   chatId: number,
   registry: ProviderRegistry,
   jobManager: JobManager,
-  store: TripleStore,
 ): string | null {
   const sections: string[] = [];
 
@@ -45,16 +46,10 @@ export function buildOrchestratorContext(
   }
 
   // 2. Recent jobs for this chat
-  const jobs = jobManager.getRecentJobs(chatId, 5);
+  const jobs = jobManager.getRecentJobs(chatId, 3);
   if (jobs.length > 0) {
     const jobLines = jobs.map(formatJob).join("\n\n");
     sections.push(`## Recent Jobs\n${jobLines}`);
-  }
-
-  // 3. Knowledge graph
-  const graph = store.toContext();
-  if (graph) {
-    sections.push(`## Known Facts\n${graph}`);
   }
 
   if (sections.length === 0) return null;

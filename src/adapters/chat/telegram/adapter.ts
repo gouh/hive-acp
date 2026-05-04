@@ -406,7 +406,7 @@ export class TelegramAdapter implements ChatAdapter {
         prompt[0].text = `${preamble}\n\n${prompt[0].text}`;
       }
 
-      // Accumulation state
+      // Accumulation state — collect chunks, send complete message at end
       let streamBuffer = "";
       let totalStreamedChars = 0;
 
@@ -475,7 +475,7 @@ export class TelegramAdapter implements ChatAdapter {
         this.bot.api.deleteMessage(chatId, toolMsgId).catch(() => {});
       }
 
-      // Send any remaining accumulated text
+      // Final delivery
       if (streamBuffer) {
         await this.sendHtml(chatId, mdToHtml(streamBuffer), throttle);
       } else if (totalStreamedChars === 0) {
