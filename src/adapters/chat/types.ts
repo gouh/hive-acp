@@ -12,6 +12,8 @@ export interface ChatContext {
   chatId: number;
   messageId: number;
   replyToMessageId?: number;
+  /** Last attachment received in this chat (photo or document). */
+  attachment?: { fileId: string; fileName: string; mimeType: string };
 }
 
 export interface ChatAdapter {

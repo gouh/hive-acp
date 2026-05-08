@@ -7,18 +7,18 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { Writable, Readable } from "node:stream";
-import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import { log } from "../utils/logger.js";
+import { TypedEmitter } from "../utils/typed-emitter.js";
 import { pkg } from "../utils/pkg.js";
 import type { CliProvider } from "./providers/types.js";
 
 const WORKSPACE = process.env.HIVE_WORKSPACE || process.cwd();
 
 /** Typed events emitted by AcpClient. */
-export interface AcpEvents {
+export type AcpEvents = {
   /** A text chunk from the agent's response. */
   chunk: (text: string) => void;
   /** A tool call started. */
@@ -31,7 +31,7 @@ export interface AcpEvents {
   exit: (code: number | null) => void;
 }
 
-export class AcpClient extends EventEmitter {
+export class AcpClient extends TypedEmitter<AcpEvents> {
   private proc: ChildProcess | null = null;
   private conn: acp.ClientSideConnection | null = null;
   private sessionId: string | null = null;
@@ -114,7 +114,9 @@ export class AcpClient extends EventEmitter {
     };
 
     const result = this.promptLock.then(() => run());
-    this.promptLock = result.then(() => {}, () => {});
+    this.promptLock = result.then(() => {}, (err) => {
+      log.acp.warn({ err: err?.message }, "prompt failed (lock released)");
+    });
     return result;
   }
 

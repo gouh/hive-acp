@@ -15,6 +15,7 @@ import type { CliProvider } from "./providers/types.js";
 import type { ProviderRegistry } from "./registry.js";
 import type { TripleStore } from "../memory/store.js";
 import { log } from "../utils/logger.js";
+import { TypedEmitter } from "../utils/typed-emitter.js";
 import { HIVE_SUMMARIES_DIR } from "../utils/paths.js";
 
 const IDLE_TTL_MS = 30 * 60 * 1000;
@@ -37,7 +38,12 @@ interface Snapshot {
   evictedAt: number;
 }
 
-export class AcpPool {
+type PoolEvents = {
+  /** Emitted when a client transitions from busy to idle. */
+  idle: (chatId: number) => void;
+};
+
+export class AcpPool extends TypedEmitter<PoolEvents> {
   private pool = new Map<number, PoolEntry>();
   private injectQueue = new Map<number, string[]>();
   private contextPrefix = new Map<number, string>();
@@ -47,7 +53,8 @@ export class AcpPool {
   private agentName: string;
   private instructions?: string;
 
-  constructor(private registry: ProviderRegistry, private store: TripleStore, orchestrator: string) {
+  constructor(registry: ProviderRegistry, private store: TripleStore, orchestrator: string) {
+    super();
     const provider = registry.resolve(orchestrator);
     if (!provider) throw new Error(`No provider found for orchestrator "${orchestrator}"`);
     this.provider = provider;
@@ -101,7 +108,10 @@ export class AcpPool {
   /** Mark a client as busy (prompt in flight) to skip watchdog health checks. */
   setBusy(chatId: number, busy: boolean): void {
     const entry = this.pool.get(chatId);
-    if (entry) entry.busy = busy;
+    if (!entry) return;
+    const wasBusy = entry.busy;
+    entry.busy = busy;
+    if (wasBusy && !busy) this.emit("idle", chatId);
   }
 
   /** Kill and remove a client from the pool (e.g. after timeout). */
@@ -276,21 +286,34 @@ export class AcpPool {
 
   /**
    * Drain queued messages by sending them as a prompt to the orchestrator agent.
-   * Returns the agent's response, or null if there was nothing to drain or no active client.
+   * If the client is busy, waits for the 'idle' event (with a 5-min safety timeout).
    */
   async drainToAgent(chatId: number): Promise<string | null> {
     const queued = this.consumeQueue(chatId);
     if (!queued) return null;
 
-    const entry = this.pool.get(chatId);
+    let entry = this.pool.get(chatId);
     if (!entry) return null;
 
-    // If the client is busy (user prompt in flight), re-queue and let the
-    // next user interaction pick it up via consumeQueue.
     if (entry.busy) {
-      log.acp.debug({ chatId }, "client busy, re-queuing for next interaction");
-      this.inject(chatId, queued);
-      return null;
+      log.acp.debug({ chatId }, "client busy, waiting for idle event");
+      const idle = await new Promise<boolean>((resolve) => {
+        const timeout = setTimeout(() => { cleanup(); resolve(false); }, 5 * 60_000);
+        const onIdle = (id: number) => {
+          if (id !== chatId) return;
+          cleanup();
+          resolve(true);
+        };
+        const cleanup = () => { clearTimeout(timeout); this.off("idle", onIdle); };
+        this.on("idle", onIdle);
+      });
+      if (!idle) {
+        log.acp.warn({ chatId }, "idle wait timed out, re-queuing");
+        this.inject(chatId, queued);
+        return null;
+      }
+      entry = this.pool.get(chatId);
+      if (!entry) return null;
     }
 
     log.acp.info({ chatId }, "draining queue to agent");

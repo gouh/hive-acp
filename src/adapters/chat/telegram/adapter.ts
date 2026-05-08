@@ -9,7 +9,7 @@
  * - UTF-8 safe message splitting
  */
 
-import { Bot, type Context, InputFile, GrammyError } from "grammy";
+import { Bot, type Context, InputFile } from "grammy";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -18,137 +18,10 @@ import type { JobManager } from "../../../orchestration/job-manager.js";
 import type { JobEvent } from "../../../orchestration/types.js";
 import type { ChatAdapter, ChatContext } from "../types.js";
 import { log } from "../../../utils/logger.js";
+import { escapeHtml, mdToHtml, splitMessage } from "../../../utils/telegram-html.js";
+import { OutboundThrottle, getRetryAfter } from "../../../utils/throttle.js";
 
-const TELEGRAM_MAX_LENGTH = 4096;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]);
-
-// ── HTML formatting ──────────────────────────────────────────
-
-/** Escape text for Telegram HTML parse mode. */
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-/**
- * Convert agent Markdown to Telegram HTML.
- * Handles: **bold**, *italic*, `code`, ```blocks```, [links](url), ~~strike~~
- * Preserves code blocks untouched.
- */
-function mdToHtml(text: string): string {
-  const codeBlocks: string[] = [];
-
-  // Extract code blocks first
-  let result = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
-    const idx = codeBlocks.length;
-    const escaped = escapeHtml(code.replace(/\n$/, ""));
-    codeBlocks.push(lang ? `<pre><code class="language-${lang}">${escaped}</code></pre>` : `<pre>${escaped}</pre>`);
-    return `\x00CB${idx}\x00`;
-  });
-
-  // Extract inline code
-  result = result.replace(/`([^`]+)`/g, (_m, code) => {
-    const idx = codeBlocks.length;
-    codeBlocks.push(`<code>${escapeHtml(code)}</code>`);
-    return `\x00CB${idx}\x00`;
-  });
-
-  // Escape HTML in remaining text
-  result = escapeHtml(result);
-
-  // Markdown → HTML conversions
-  result = result.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
-  result = result.replace(/\*(.+?)\*/g, "<i>$1</i>");
-  result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-
-  // Strip MarkdownV2 escapes (e.g. \. \- \( \))
-  result = result.replace(/\\([_*[\]()~`>#+\-=|{}.!])/g, "$1");
-
-  // Restore code blocks
-  result = result.replace(/\x00CB(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)]);
-
-  return result;
-}
-
-// ── OutboundThrottle ─────────────────────────────────────────
-
-/** Rate-limit outbound Telegram API calls with RetryAfter handling. */
-class OutboundThrottle {
-  private nextAllowedAt = 0;
-
-  constructor(private minIntervalMs = 2000) {}
-
-  /** Wait until we can send. */
-  async wait(): Promise<void> {
-    const now = Date.now();
-    if (this.nextAllowedAt > now) {
-      await new Promise((r) => setTimeout(r, this.nextAllowedAt - now));
-    }
-    this.nextAllowedAt = Date.now() + this.minIntervalMs;
-  }
-
-  /** Check if we can send now (non-blocking). */
-  tryNow(): boolean {
-    const now = Date.now();
-    if (this.nextAllowedAt > now) return false;
-    this.nextAllowedAt = now + this.minIntervalMs;
-    return true;
-  }
-
-  /** Defer next send by a duration (e.g. after RetryAfter). */
-  defer(ms: number): void {
-    const retryAt = Date.now() + ms;
-    if (retryAt > this.nextAllowedAt) this.nextAllowedAt = retryAt;
-  }
-}
-
-/** Extract RetryAfter seconds from a GrammyError, or null. */
-function getRetryAfter(err: any): number | null {
-  if (err instanceof GrammyError && err.error_code === 429) {
-    const match = err.description?.match(/retry after (\d+)/i);
-    return match ? parseInt(match[1]) : 5;
-  }
-  return null;
-}
-
-// ── UTF-8 safe message splitting ─────────────────────────────
-
-/** Split text into chunks that fit within maxLen, respecting UTF-8 char boundaries. */
-function splitMessage(text: string, maxLen = TELEGRAM_MAX_LENGTH): string[] {
-  if (text.length <= maxLen) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLen) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Find a safe split point: prefer double newline, then single newline, then maxLen
-    let splitAt = remaining.lastIndexOf("\n\n", maxLen);
-    if (splitAt <= 0) splitAt = remaining.lastIndexOf("\n", maxLen);
-    if (splitAt <= 0) splitAt = maxLen;
-
-    // Ensure we don't split in the middle of a multi-byte character
-    while (splitAt > 0 && isContinuationByte(remaining, splitAt)) {
-      splitAt--;
-    }
-
-    chunks.push(remaining.slice(0, splitAt));
-    remaining = remaining.slice(splitAt).replace(/^\n+/, "");
-  }
-
-  return chunks;
-}
-
-/** Check if byte at position is a UTF-8 continuation byte (0x80-0xBF). */
-function isContinuationByte(str: string, pos: number): boolean {
-  const code = str.charCodeAt(pos);
-  // Surrogate pair check — don't split between high and low surrogates
-  return code >= 0xDC00 && code <= 0xDFFF;
-}
 
 // ── Adapter ──────────────────────────────────────────────────
 
@@ -376,7 +249,6 @@ export class TelegramAdapter implements ChatAdapter {
     log.telegram.info({ chatId, userId, preview: text.slice(0, 80) || (hasPhoto ? "[photo]" : "[document]") }, "message received");
 
     let typingInterval: ReturnType<typeof setInterval> | null = null;
-    let acpInstance: any = null;
     const eventCleanups: Array<() => void> = [];
     const throttle = new OutboundThrottle(2000);
 
@@ -395,7 +267,6 @@ export class TelegramAdapter implements ChatAdapter {
 
       const prompt = await this.buildPrompt(ctx, text);
       const acp = await this.pool.get(chatId);
-      acpInstance = acp;
       this.pool.setBusy(chatId, true);
 
       const prefix = this.pool.consumePrefix(chatId);
@@ -500,6 +371,11 @@ export class TelegramAdapter implements ChatAdapter {
 
   // ── Prompt building ────────────────────────────────────────
 
+  private setAttachment(chatId: number, fileId: string, fileName: string, mimeType: string): void {
+    const ctx = this.activeCtx.get(chatId);
+    if (ctx) ctx.attachment = { fileId, fileName, mimeType };
+  }
+
   private async buildPrompt(
     ctx: Context,
     text: string,
@@ -516,6 +392,7 @@ export class TelegramAdapter implements ChatAdapter {
 
     if (msg.photo && msg.photo.length > 0) {
       const photo = msg.photo[msg.photo.length - 1];
+      this.setAttachment(msg.chat.id, photo.file_id, "photo.jpg", "image/jpeg");
       const imageData = await this.downloadFileAsBase64(ctx, photo.file_id);
       if (imageData) {
         if (!text) header += "[The user sent a photo]";
@@ -527,6 +404,8 @@ export class TelegramAdapter implements ChatAdapter {
 
     if (msg.document) {
       const ext = path.extname(msg.document.file_name || "").toLowerCase();
+      const mimeType = msg.document.mime_type || "application/octet-stream";
+      this.setAttachment(msg.chat.id, msg.document.file_id, msg.document.file_name || "file", mimeType);
       if (IMAGE_EXTENSIONS.has(ext)) {
         const imageData = await this.downloadFileAsBase64(ctx, msg.document.file_id);
         if (imageData) {

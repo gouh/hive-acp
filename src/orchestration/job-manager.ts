@@ -7,14 +7,18 @@
  */
 
 import crypto from "node:crypto";
-import { EventEmitter } from "node:events";
+import { TypedEmitter } from "../utils/typed-emitter.js";
 import { AcpClient } from "../acp/client.js";
 import type { ProviderRegistry } from "../acp/registry.js";
 import type { TripleStore } from "../memory/store.js";
 import { log } from "../utils/logger.js";
 import type { Job, JobEvent, TaskEntry } from "./types.js";
 
-export class JobManager extends EventEmitter {
+export type JobManagerEvents = {
+  event: (evt: JobEvent) => void;
+};
+
+export class JobManager extends TypedEmitter<JobManagerEvents> {
   private jobs = new Map<string, Job>();
   private clients = new Map<string, AcpClient>();
 
