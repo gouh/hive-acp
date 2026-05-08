@@ -10,6 +10,7 @@ import type { ChatAdapter } from "../types.js";
 import type { TelegramAdapter } from "./adapter.js";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif"]);
 
@@ -50,6 +51,16 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
           required: ["emoji"],
         },
       },
+      {
+        name: "telegram_download_attachment",
+        description:
+          "Download the last attachment (photo or document) the user sent to /tmp and return the file path. " +
+          "Use this when you need to save, process, or copy an image/file the user sent via Telegram.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
     ],
 
     async execute(toolName: string, args: any): Promise<string> {
@@ -84,6 +95,18 @@ export function createTelegramTools(adapter: TelegramAdapter, workspace: string)
           ]);
 
           return `✅ Reacted with ${args.emoji} to message ${targetId}`;
+        }
+
+        case "telegram_download_attachment": {
+          if (!ctx.attachment) throw new Error("No attachment found in the current message");
+          const { fileId, fileName } = ctx.attachment;
+          const file = await adapter.bot.api.getFile(fileId);
+          const url = `https://api.telegram.org/file/bot${adapter.bot.token}/${file.file_path}`;
+          const res = await fetch(url);
+          const buffer = Buffer.from(await res.arrayBuffer());
+          const tmpPath = path.join(os.tmpdir(), `telegram-${Date.now()}-${fileName}`);
+          fs.writeFileSync(tmpPath, buffer);
+          return tmpPath;
         }
 
         default:

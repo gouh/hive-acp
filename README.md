@@ -6,22 +6,38 @@ Currently supports **Telegram** via [grammy](https://grammy.dev/), with an exten
 
 ## Architecture
 
-```
-┌─────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  Telegram    │────▶│  TelegramAdapter │────▶│     AcpPool      │
-│  (grammy)   │◀────│  (ChatAdapter)   │     │  (main provider) │──▶ ACP (stdio)
-└─────────────┘     └──────────────────┘     └──────────────────┘
-                                                      │
-┌─────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  MCP Tools  │────▶│  WebSocket MCP   │     │  ProviderRegistry │
-│  (bridge)   │◀────│  Server          │     │  ┌─────────────┐ │
-└─────────────┘     └──────────────────┘     │  │ kiro        │ │
-                                             │  │ opencode    │ │
-┌─────────────┐     ┌──────────────────┐     │  └─────────────┘ │
-│  Subagents  │◀────│   JobManager     │◀────┤                  │
-│  (parallel) │────▶│  (orchestration) │     │  Resolves agent  │
-└─────────────┘     └──────────────────┘     │  → provider      │
-                                             └──────────────────┘
+```mermaid
+graph LR
+  subgraph Chat Platform
+    TG[Telegram<br/><small>grammy</small>]
+  end
+
+  subgraph Core
+    Adapter[TelegramAdapter<br/><small>ChatAdapter</small>]
+    Pool[AcpPool<br/><small>idle eviction · health checks · context</small>]
+    Registry[ProviderRegistry]
+    JM[JobManager<br/><small>parallel orchestration</small>]
+  end
+
+  subgraph Agents
+    ACP1[AcpClient<br/><small>stdio JSON-RPC</small>]
+    ACP2[AcpClient<br/><small>subagent</small>]
+  end
+
+  subgraph MCP
+    Bridge[WebSocket MCP Server]
+    Tools[Tool Categories<br/><small>telegram · context · memory<br/>orchestration · terminal · images · screenshot</small>]
+  end
+
+  TG <-->|messages| Adapter
+  Adapter --> Pool
+  Pool --> ACP1
+  Pool -.->|idle event| JM
+  Registry -->|resolve provider| Pool
+  Registry -->|resolve provider| JM
+  JM --> ACP2
+  ACP1 <-->|tools/list · tools/call| Bridge
+  Bridge --- Tools
 ```
 
 ### Key components
@@ -71,6 +87,7 @@ On first run, hive-acp creates `~/.hive-acp/` as its central home:
 |---|---|
 | `telegram_send_file` | Send a file from the workspace to the active chat |
 | `telegram_react` | React to a message with an emoji |
+| `telegram_download_attachment` | Download the last photo/document the user sent to `/tmp` and return the path |
 
 ### Context
 | Tool | Description |
@@ -225,6 +242,7 @@ src/
 │       └── tools.ts                  # Terminal execute MCP tool
 ├── orchestration/
 │   ├── job-manager.ts                # Subagent task orchestration
+│   ├── context.ts                    # Dynamic orchestrator context builder
 │   ├── tools.ts                      # Orchestration MCP tools (dispatch, job, cancel)
 │   └── types.ts                      # Job, TaskEntry, JobEvent types
 ├── mcp/
@@ -244,7 +262,10 @@ src/
     ├── env.ts                        # dotenv loader
     ├── logger.ts                     # Pino structured JSON logger
     ├── paths.ts                      # Central paths (~/.hive-acp/) and bootstrap
-    └── pkg.ts                        # package.json reader
+    ├── pkg.ts                        # package.json reader
+    ├── typed-emitter.ts              # Type-safe EventEmitter wrapper
+    ├── telegram-html.ts              # Markdown→HTML conversion and message splitting
+    └── throttle.ts                   # Outbound rate limiter with RetryAfter handling
 ```
 
 ## Adding a new provider
@@ -262,7 +283,6 @@ interface CliProvider {
   args: string[];
   env?: Record<string, string>;
   capabilities: Record<string, any>;
-  parser: ResponseParser;
   agentFlag?: string; // CLI flag to select agent (e.g. "--agent")
 }
 ```

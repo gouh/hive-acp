@@ -106,7 +106,7 @@ async function boot(): Promise<void> {
   const jobManager = new JobManager(registry, store);
 
   chat.bindJobManager(jobManager, pool);
-  chat.setContextBuilder((chatId) => buildOrchestratorContext(chatId, registry, jobManager, store));
+  chat.setContextBuilder((chatId) => buildOrchestratorContext(chatId, registry, jobManager));
 
   const categories: ToolCategory[] = [
     createTelegramTools(chat, WORKSPACE),
